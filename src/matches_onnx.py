@@ -13,9 +13,15 @@ class FeatureMatcherONNX:
         self.WIDTH = 1920
         self.HEIGHT = 1080
 
+        self.superpointWidth = 640
+        self.superpointHeight = 480
+
+        self.ratio_height = self.HEIGHT / self.superpointHeight
+        self.ratio_width = self.WIDTH / self.superpointWidth
+
         # ── Matches shared memory setup (Kept identical to yours) ────────────────
         self.SHM_NAME_MATCHES = "sp_sg_matches"
-        self.MAX_KP_MATCHES = 2048
+        self.MAX_KP_MATCHES = 512
         self.SHM_SIZE_MATCHES = 1 + 1 + 1 + 4 + 4 + self.MAX_KP_MATCHES * (2 + 2 + 1 + 3) * 4
         
         try:
@@ -35,8 +41,8 @@ class FeatureMatcherONNX:
         self.last_processed_frame_id = -1
 
         # ── ONNX Runtime Session with TensorRT Provider ─────────────────────────
-        self.sp_session = self.get_session("weights/superpoint.onnx")
-        self.lg_session = self.get_session("weights/lightglue_static.onnx")
+        self.sp_session = self.get_session("weights/superpoint.onnx", provider="cuda")
+        self.lg_session = self.get_session("weights/lightglue_patched.onnx", provider="cuda")
 
         # Extract and cache target features — call again to switch target
         self.set_target(target_image_path)
@@ -56,7 +62,32 @@ class FeatureMatcherONNX:
             if "CUDAExecutionProvider" not in available:
                 raise RuntimeError("CUDAExecutionProvider is not available")
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        # elif provider == "trt":                                          # ← add this
+        #     if "TensorrtExecutionProvider" not in available:
+        #         raise RuntimeError("TensorrtExecutionProvider not available")
+        #     providers = [
+        #         ('TensorrtExecutionProvider', {
+        #             'trt_engine_cache_enable': True,
+        #             'trt_engine_cache_path':   'weights/trt_cache',
+        #             'trt_fp16_enable':         True,
+        #             "trt_profile_min_shapes": "image:1x1x480x640",
+        #             "trt_profile_opt_shapes": "image:1x1x480x640",
+        #             "trt_profile_max_shapes": "image:1x1x480x640",
+        #         }),
+        #         'CUDAExecutionProvider',
+        #         'CPUExecutionProvider',
+        #     ]
         elif provider == "auto":
+            # if "TensorrtExecutionProvider" in available:                 # ← prefer TRT
+            #     providers = [
+            #         ('TensorrtExecutionProvider', {
+            #             'trt_engine_cache_enable': True,
+            #             'trt_engine_cache_path':   'weights/trt_cache',
+            #             'trt_fp16_enable':         True,
+            #         }),
+            #         'CUDAExecutionProvider',
+            #         'CPUExecutionProvider',
+            #     ]
             if "CUDAExecutionProvider" in available:
                 providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             else:
@@ -76,87 +107,11 @@ class FeatureMatcherONNX:
         print("[FeatureMatcher] Active:", session.get_providers())
         return session
 
-    def get_session1(self, model_path, provider="auto"):
-        available = ort.get_available_providers()
-
-        if provider == "cpu":
-            providers = ["CPUExecutionProvider"]
-
-        elif provider == "cuda":
-            if "CUDAExecutionProvider" not in available:
-                raise RuntimeError(
-                    "CUDAExecutionProvider is not available"
-                )
-
-            providers = [
-                "CUDAExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-
-        elif provider == "tensorrt":
-            if "TensorrtExecutionProvider" not in available:
-                raise RuntimeError(
-                    "TensorrtExecutionProvider is not available"
-                )
-
-            providers = [
-                "TensorrtExecutionProvider",
-                "CUDAExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-
-        elif provider == "auto":
-            if "TensorrtExecutionProvider" in available:
-                providers = [
-                    "TensorrtExecutionProvider",
-                    "CUDAExecutionProvider",
-                    "CPUExecutionProvider",
-                ]
-            elif "CUDAExecutionProvider" in available:
-                providers = [
-                    "CUDAExecutionProvider",
-                    "CPUExecutionProvider",
-                ]
-            else:
-                providers = ["CPUExecutionProvider"]
-
-        else:
-            raise ValueError(f"Unknown provider: {provider}")
-
-        print("[FeatureMatcher] Available:", available)
-        print("[FeatureMatcher] Requested:", providers)
-
-        # session = ort.InferenceSession(
-        #     model_path,
-        #     providers=providers,
-        # )
-        session = self.create_session(model_path, providers)
-        print("[FeatureMatcher] Active:", session.get_providers())
-
-        return session
-
-    def create_session(model_path, provider):
-        so = ort.SessionOptions()
-
-        so.intra_op_num_threads = 4
-        so.inter_op_num_threads = 1
-
-        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-
-        # Diagnostic: reduce persistent host-side allocations
-        so.enable_mem_pattern = False
-        so.enable_cpu_mem_arena = False
-
-        return ort.InferenceSession(
-            model_path,
-            sess_options=so,
-            providers=provider,
-        )
 
     def set_target(self, target_image_path: str):
         """Call this whenever the target image changes — no re-export needed."""
         img = cv2.imread(target_image_path, cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (self.WIDTH, self.HEIGHT))
+        img = cv2.resize(img, (self.superpointWidth, self.superpointHeight))
         tensor = img.astype(np.float32) / 255.0
         tensor = tensor[None, None]  # (1,1,H,W)
 
@@ -227,6 +182,7 @@ class FeatureMatcherONNX:
 
         while frame_id == self.last_processed_frame_id or is_writing == 1:
             time.sleep(0.001)
+            # print(f"[FeatureMatcher] waiting for frame from c++")
             is_writing = self.buf_frames[1]
             frame_id = struct.unpack_from("<I", self.buf_frames, 4)[0]
 
@@ -240,7 +196,7 @@ class FeatureMatcherONNX:
 
         return frame_np, frame_id
 
-    def _filter_by_grid(self, mkpts0, mkpts1, mscores, rows=2, cols=3, per_cell=50, min_score=0.75):
+    def _filter_by_grid(self, mkpts0, mkpts1, mscores, rows=2, cols=3, per_cell=25, min_score=0.75):
         if len(mscores) == 0:
             return mkpts0, mkpts1, mscores
         
@@ -254,7 +210,7 @@ class FeatureMatcherONNX:
         mscores_v = mscores[valid_mask]
         
         # 2. Vectorized 2D Grid Cell Assignment
-        cell_h, cell_w = self.HEIGHT / rows, self.WIDTH / cols
+        cell_h, cell_w = self.superpointHeight / rows, self.superpointWidth / cols
         
         col_idx = np.clip((mkpts1_v[:, 0] / cell_w).astype(np.int64), 0, cols - 1)
         row_idx = np.clip((mkpts1_v[:, 1] / cell_h).astype(np.int64), 0, rows - 1)
@@ -323,10 +279,10 @@ class FeatureMatcherONNX:
     def run(self):
         try:
             while self.running:
-                cur_image, frame_id = self._get_latest_frame()
-                if cur_image is None or frame_id == -1:
+                cur_image_, frame_id = self._get_latest_frame()
+                if cur_image_ is None or frame_id == -1:
                     break
-
+                cur_image = cv2.resize(cur_image_, (self.superpointWidth, self.superpointHeight), interpolation=cv2.INTER_AREA)
                 # Preprocess frame to match model expectations [1, 1, H, W]
                 cur_tensor = cur_image.astype(np.float32) / 255.0
                 # cur_tensor = np.expand_dims(np.expand_dims(cur_tensor, 0), 0)
@@ -337,6 +293,7 @@ class FeatureMatcherONNX:
                                             cur_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': cur_tensor}))
                 # kpts0, desc0, scores0 = self._pad_features(kpts0_, desc0_, scores0_)
                 # Step 2: match against cached target features
+                print(f"[FeatureMatcher] Keypoints found : {cur_num_keypoints}")
                 outputs = self.lg_session.run(None, {
                     'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
                     'kpts1':   self.target_kpts, 'desc1':   self.target_desc, 'scores1': self.target_scores })
@@ -357,13 +314,19 @@ class FeatureMatcherONNX:
 
                 # matches = np.stack([idx0, idx1], axis=1)
 
-                mkpts0 = kpts0[0][idx0]
+                mkpts0 = kpts0[0][idx0] 
                 mkpts1 = self.target_kpts[0][idx1]
 
-                # mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
+                # scale back to original resolution
+                mkpts0[:, 0] *= self.ratio_width   # x
+                mkpts0[:, 1] *= self.ratio_height   # y
+                mkpts1[:, 0] *= self.ratio_width
+                mkpts1[:, 1] *= self.ratio_height
 
-                covariances = self._compute_patch_covariances_numpy(cur_image, mkpts0)
-                self._write_matches(mkpts0, mkpts1, scores, covariances)
+                mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
+                print(f"[FeatureMatcher] matches found: {len(scores)}")
+                covariances = self._compute_patch_covariances_numpy(cur_image_, mkpts0_filtered)
+                self._write_matches(mkpts0_filtered, mkpts1_filtered, scores_filtered, covariances)
 
         finally:
             self._cleanup()
@@ -389,6 +352,7 @@ class FeatureMatcherONNX:
         self.buf[offset:offset + N*4] = mscores.tobytes(); offset += N*4
         self.buf[offset:offset + N*12] = covariances.tobytes()
         self.buf[1] = 0
+        print(f"Wrote matches to shared memory")
 
     def _cleanup(self):
         self.shm_frames.close()

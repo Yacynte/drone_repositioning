@@ -26,7 +26,7 @@
 
 class SPSGReader {
 public:
-    static constexpr int    MAX_KP   = 1024;
+    static constexpr int    MAX_KP   = 512;
     static constexpr size_t SHM_SIZE = 1 + 1 + 1 + 4 + 4 + MAX_KP * (2+2+1+3) * 4;
 
     explicit SPSGReader(const char* name = "/sp_sg_matches") {
@@ -107,6 +107,20 @@ public:
     bool stop() {
         volatile uint8_t* data  = static_cast<volatile uint8_t*>(ptr_);
         data[0] = 0; // signal to Python to stop
+        if (ptr_ != nullptr) {
+            // TOTAL_SHM_SIZE must be the same size you used in mmap()
+            if (munmap(ptr_, SHM_SIZE) == -1) {
+                std::cerr << "munmap failed" << std::endl;
+            }
+            ptr_ = nullptr;
+        }
+       
+        // 2. Close the file descriptor (if it is open)
+        if (fd_ != -1) {
+            close(fd_);
+            fd_ = -1;
+        }
+
         return true;
     }
 

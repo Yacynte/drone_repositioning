@@ -28,20 +28,142 @@ bool openCapture(const std::string& mode,
                  int cameraIndex,
                  cv::VideoCapture& cap) {
     if (mode == "live") {
-        if (!cap.open(cameraIndex, cv::CAP_V4L2)) {
-            std::cerr << "Warning: cv::CAP_V4L2 failed, trying default backend..." << std::endl;
-            if (!cap.open(cameraIndex)) return false;
+
+        auto reconnect = [&]() -> bool {
+            std::cerr << "[CAM] Reconnecting to camera...\n";
+            cap.release();
+
+            // Wait for the device node to come back
+            // for (int i = 0; i < 10; ++i) {
+            //     std::this_thread::sleep_for(std::chrono::seconds(1));
+            //     if (std::filesystem::exists(devicePath_)) break;
+            //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
+            // }
+
+            cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
+            if (!cap.isOpened()) {
+                std::cerr << "[CAM] Reconnect failed\n";
+                return false;
+            }
+
+            // Re-apply your capture settings
+            cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+            cap.set(cv::CAP_PROP_FRAME_WIDTH,  1920);
+            cap.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
+            cap.set(cv::CAP_PROP_FPS,          30);
+            cap.set(cv::CAP_PROP_BUFFERSIZE,   4);
+
+            // Flush stale frames
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            cv::Mat tmp;
+            for (int i = 0; i < 10; ++i) cap.read(tmp);
+
+            std::cerr << "[CAM] Reconnected\n";
+            return true;
+        };
+        // int indices[] = {cameraIndex, cameraIndex == 0 ? 1 : 0};
+        std::string device = "/dev/video" + std::to_string(cameraIndex);
+        if (!std::filesystem::exists(device)){ 
+        std::cout << "[Camera] file " << device << " does not exist\n";
+            cameraIndex = (cameraIndex == 0) ? 1 : 0;
         }
+
+        cap.release();
+
+        // for (int index : indices) {
+        std::cout << "[Camera] Trying /dev/video" << cameraIndex << std::endl;
+
+        // cap.release();
+
+        if (cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2)) {
+            std::cout << "[Camera] Opened /dev/video"<< cameraIndex << std::endl;
+            // break;
+        }
+        else{std::cerr << "[Camera] Failed to open /dev/video"<< cameraIndex << std::endl;}
+
+        // }
+
+        // cap.open(preferredIndex, cv::CAP_V4L2);
+        if (!cap.isOpened()) {
+            std::cerr << "Warning: cv::CAP_V4L2 failed, trying default backend..." << std::endl;
+            if (!cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0")) return false;
+        }
+        std::cout << "Camera opened successfully\n";
+        std::cout << "Backend: " << cap.getBackendName() << "\n";
         cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+        cap.set(cv::CAP_PROP_FRAME_WIDTH, 1920);
+        cap.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
+        cap.set(cv::CAP_PROP_FPS, 30);
+        cap.set(cv::CAP_PROP_BUFFERSIZE, 4);
+
+        // Same as time.sleep(1.0)
+        std::cout << "Warming up sensor...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        cv::Mat frame;
+
+        // Same as the Python warmup loop
+        int failCount = 0;
+        const int MAX_FAILS = 1;
+        for (int i = 0; i < 10; ++i) {
+            try {
+                bool success = false;
+                try {
+                    success = cap.read(frame);
+                } catch (const cv::Exception& e) {
+                    std::cerr << "[CAM] read exception: " << e.what() << "\n";
+                    continue;
+                }
+
+                if (!success || frame.empty()) {
+                    failCount++;
+                    std::cerr << "[CAM] No frame (" << failCount << "/" << MAX_FAILS << ")\n";
+
+                    if (failCount >= MAX_FAILS) {
+                        failCount = 0;
+                        if (!reconnect())
+                            std::this_thread::sleep_for(std::chrono::seconds(2));
+                    } else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    continue;
+                }
+
+                failCount = 0;
+
+                // std::cout << "Warmup frame " << i
+                //         << ": ret=" << ret
+                //         << ", empty=" << frame.empty()
+                //         << "\n";
+            }
+            catch (const cv::Exception& e) {
+                std::cerr << "Exception during warmup frame "
+                        << i << ":\n"
+                        << e.what() << "\n";
+                        return false;
+            }
+        }
         return true;
     }
 
     if (mode == "stream" && !(streamUrl.find("tcp") != std::string::npos)) {
-        while (!cap.open(streamUrl, cv::CAP_FFMPEG)) {
+        setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp", 1);
+        // while (!cap.open(streamUrl, cv::CAP_FFMPEG)) {
+        //     std::cout << "Waiting for stream to be available: " << streamUrl << std::endl;
+        //     usleep(1000 * 1000);
+        // }
+        // Retry loop until the stream is successfully opened
+        while (!cap.isOpened()) {
             std::cout << "Waiting for stream to be available: " << streamUrl << std::endl;
-            usleep(1000 * 1000);
+            
+            // Explicitly call open with CAP_FFMPEG on every retry iteration
+            cap.open(streamUrl, cv::CAP_FFMPEG);
+
+            if (!cap.isOpened()) {
+                usleep(1000 * 1000); // Wait 1 second before trying again
+            }
         }
-        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        // cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
         return true;
     }
     if (mode == "stream" && streamUrl.find("tcp") != std::string::npos) {
@@ -77,8 +199,8 @@ int main(int argc, char** argv) {
 
     const std::string logPath = getStr(flags, "--log", "../data/");
     const std::string targetImagePath = getStr(flags, "--target", "../target.png");
-    const int imgHeight = getInt(flags, "--imgHeight", 640);
-    const int imgWidth = getInt(flags, "--imgWidth", 480);
+    const int imgHeight = getInt(flags, "--imgHeight", 1080);
+    const int imgWidth = getInt(flags, "--imgWidth", 1920);
 
     // bool hardStop = false;
 
@@ -117,8 +239,8 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
+    // cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
+    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
     if (!cap.isOpened() && !(streamUrl.find("tcp") != std::string::npos)) {
         std::cerr << "Error: Cannot open camera/stream" << std::endl;
         return -1;
@@ -137,6 +259,7 @@ int main(int argc, char** argv) {
     if (mode == "stream" ) {
        cam = streamUrl;
     }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     // std::cout << "To launch Python process for matches.py "<< std::endl;
     // launch_python(targetImagePath);
     launch_python_posix(targetImagePath);
@@ -203,9 +326,11 @@ int main(int argc, char** argv) {
         }
 
         hasStarted = true;
-        cv::Mat frame;
-        if (!reader.getFrame(frame)) {
-            std::cout << "Waiting to receive image \n";
+        // cv::Mat frame;
+        // bool success;
+        auto [frame, success_frame] = reader.getFrame();
+        if (!success_frame) {
+            // std::cout << "Waiting to receive image \n";
             // Skip processing when no new frame is available.
             continue;
         }
@@ -297,8 +422,8 @@ int main(int argc, char** argv) {
 
         double currentTime = AlgoLogger::nowWallSec();
         
-        if (atTarget && ((currentTime - arrivalTime > 2.0) ) && arrivalTime > 0.0) {
-            std::cout << "Maintained target position for 3 seconds, stopping repositioning" << std::endl;
+        if (atTarget && ((currentTime - arrivalTime > 1.0) ) && arrivalTime > 0.0) {
+            std::cout << "Maintained target position for 2 seconds, stopping repositioning" << std::endl;
             std::string dataToSend;
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
@@ -315,8 +440,9 @@ int main(int argc, char** argv) {
         logger.log(currentTime, transError, rotation, unit_vect, parsed);
 
     }
-
     matchesReader.stop();
+    reader.stop();
+        
     client.stopReceiver();
     return 0;
 }

@@ -1101,14 +1101,14 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
         //           << "]" << std::endl;
     }
     
-    cv::Mat Rf, tf, inliersE, maskE;
-    if (t_init.isZero()) {
-        cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, 2000, maskE);
-        int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, Rf, tf, inliersE);
-        cv::Mat t64;
-        tf.convertTo(t64, CV_64F);
-        t_init = Eigen::Vector3d(t64.at<double>(0), t64.at<double>(1), t64.at<double>(2));
-    }
+    // cv::Mat Rf, tf, inliersE, maskE;
+    // if (t_init.isZero()) {
+    //     cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, 2000, maskE);
+    //     int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, Rf, tf, inliersE);
+    //     cv::Mat t64;
+    //     tf.convertTo(t64, CV_64F);
+    //     t_init = Eigen::Vector3d(t64.at<double>(0), t64.at<double>(1), t64.at<double>(2));
+    // }
     
     double totalError_ = 0.0d;
     // R = cv::matToMatrix3d(Rf);

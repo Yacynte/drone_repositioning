@@ -60,3 +60,14 @@ dpkg -l | grep jetpack     # e.g. JetPack 6.1 → CUDA 12.6
 pip install \
   https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime_gpu-1.20.1-cp310-cp310-linux_aarch64.whl \
   opencv-python numpy
+
+
+sudo timedatectl set-ntp on
+sudo usermod -aG video $USER
+./build/ImageMatcher --mode "live" --target "target_lab3.png" --imgHeight 1080 --imgWidth 1920
+
+# Temporary (until reboot)
+echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend
+
+# Permanent — add to /etc/rc.local or a udev rule
+echo 'options usbcore autosuspend=-1' | sudo tee /etc/modprobe.d/usb-autosuspend.conf

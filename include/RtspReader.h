@@ -37,7 +37,8 @@ public:
 
     void start(cv::VideoCapture* externalCap = nullptr);
     void stop();
-    bool getFrame(cv::Mat& out);
+    // bool getFrame(cv::Mat& out);
+    std::tuple<cv::Mat, bool> getFrame();
 
     static constexpr uint32_t WIDTH = 1920;
     static constexpr uint32_t HEIGHT = 1080;
@@ -63,6 +64,7 @@ private:
     uint8_t* image_buffer_{nullptr};
     void create_and_map_shm();
     void write_frame(const cv::Mat& frame);
+    void cleanupSharedMemory();
 
     void readerLoop();
     void DroneReaderLoop();
