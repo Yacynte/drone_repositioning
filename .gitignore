@@ -14,3 +14,6 @@ controls/images*
 controls/groundTruths
 LightGlue*
 targets*
+weights/*
+!weights/lightglue_patched.onnx
+!weights/superpoint.onnx
