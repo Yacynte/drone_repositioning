@@ -1,8 +1,37 @@
 #include "ImageMatcher.h"
 #include <opencv2/opencv.hpp>
 #include <iostream>
+#include <algorithm>
 
-int main() {
+int main(int argc, char** argv) {
+    // Choose input mode: "live" (default) or "stream <url>"
+    std::string mode = "live";
+    std::string stream_url;
+    int camera_index = 0;
+    if (argc >= 2) mode = argv[1];
+    if (mode == "stream") {
+        if (argc >= 3) {
+            stream_url = argv[2];
+        } else {
+            stream_url = "http://10.116.88.38:80";
+            std::cout << "Using default stream: " << stream_url << std::endl;
+            std::cout << "Usage: " << argv[0] << " [live|stream] [stream_url]\n";
+            return -1;
+        }
+    }
+    else if (mode == "live") {
+        if (argc >= 3) {
+            // Safe conversion from argv[2] to int
+            try {
+                camera_index = std::stoi(argv[2]);
+            } catch (const std::exception &e) {
+                std::cerr << "Invalid camera index '" << argv[2] << "': " << e.what()
+                          << ". Defaulting to 0.\n";
+                camera_index = 0;
+            }
+        }
+    }
+
     // Load target image
     ImageMatcher matcher("../target.jpg");
     // Speed mapping (smooth saturating)
@@ -12,16 +41,39 @@ int main() {
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
     cv::Point3f cmd_vx = cv::Point3f(0,0,0);
 
-    // Open default camera
-    // cv::VideoCapture cap(0, cv::CAP_V4L2);
-    cv::VideoCapture cap(0, cv::CAP_V4L2);
-    cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+    cv::VideoCapture cap;
+
+    if (mode == "live") {
+        // Open local camera
+        if (!cap.open(camera_index, cv::CAP_V4L2)) {
+            std::cerr << "Warning: cv::CAP_V4L2 failed, trying default backend..." << std::endl;
+            if (!cap.open(0)) {
+                std::cerr << "Error: Cannot open local camera" << std::endl;
+                return -1;
+            }
+        }
+    } else {
+        // Open IP stream (RTSP / HTTP MJPEG). Example usage:
+        //   ./app stream "rtsp://user:pass@192.168.1.100:554/stream"
+        //   ./app stream "http://192.168.1.100:8080/video"
+        if (!cap.open(stream_url, cv::CAP_FFMPEG)) {
+            std::cerr << "Warning: cv::CAP_FFMPEG failed, trying default backend..." << std::endl;
+            if (!cap.open(stream_url)) {
+                std::cerr << "Error: Cannot open stream: " << stream_url << std::endl;
+                return -1;
+            }
+        }
+        // prefer MJPEG/FourCC if stream provides it
+        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+    }
+
     cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
     if (!cap.isOpened()) {
-        std::cerr << "Error: Cannot open camera" << std::endl;
+        std::cerr << "Error: Cannot open camera/stream" << std::endl;
         return -1;
     }
+
 
     cv::Mat frame;
     while (true) {
