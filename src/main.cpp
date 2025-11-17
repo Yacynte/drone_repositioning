@@ -13,6 +13,7 @@ int main(int argc, char** argv) {
         if (argc >= 3) {
             stream_url = argv[2];
         } else {
+            //   stream_url = "rtsp://user:pass@192.168.1.100:554/stream"
             stream_url = "http://10.116.88.38:80";
             std::cout << "Using default stream: " << stream_url << std::endl;
             std::cout << "Usage: " << argv[0] << " [live|stream] [stream_url]\n";
@@ -35,8 +36,8 @@ int main(int argc, char** argv) {
     // Load target image
     ImageMatcher matcher("../target.jpg");
     // Speed mapping (smooth saturating)
-    float k = 0.02;              // tune
-    float v_max = 1.0;           // m/s or drone units
+    float k = 0.02;              // dampling factor (1/m)
+    float v_max = 1.0;           // drone units (m/s)
     float v_min = 0.05;
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
     cv::Point3f cmd_vx = cv::Point3f(0,0,0);
@@ -53,9 +54,7 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        // Open IP stream (RTSP / HTTP MJPEG). Example usage:
-        //   ./app stream "rtsp://user:pass@192.168.1.100:554/stream"
-        //   ./app stream "http://192.168.1.100:8080/video"
+        // Open IP stream (RTSP / HTTP)
         if (!cap.open(stream_url, cv::CAP_FFMPEG)) {
             std::cerr << "Warning: cv::CAP_FFMPEG failed, trying default backend..." << std::endl;
             if (!cap.open(stream_url)) {
