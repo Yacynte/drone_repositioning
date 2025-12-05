@@ -2,9 +2,20 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <algorithm>
+#include "MetadataClient.h"
 
 int main(int argc, char** argv) {
     // Choose input mode: "live" (default) or "stream <url>"
+     MetadataTcpClient client;
+    
+    // 1. Connect (Uses default 127.0.0.1:9001)
+    if (!client.Connect()) {
+        std::cerr << "Failed to connect to server. Ensure the server is running on port 9001." << std::endl;
+        return 0;
+    }
+    else {
+        std::cout << "Successfully connected to metadata server." << std::endl;
+    }
     std::string mode = "live";
     std::string stream_url;
     int camera_index = 0;
@@ -12,8 +23,10 @@ int main(int argc, char** argv) {
     if (mode == "stream") {
         if (argc >= 3) {
             stream_url = argv[2];
+            std::cout << "Using stream URL: " << stream_url << std::endl;
         } else {
-            stream_url = "http://10.116.88.38:80";
+            // stream_url = "http://10.116.88.38:80";
+            stream_url = "rstp://172.28.240.1/mysream";
             std::cout << "Using default stream: " << stream_url << std::endl;
             std::cout << "Usage: " << argv[0] << " [live|stream] [stream_url]\n";
             return -1;
@@ -23,6 +36,7 @@ int main(int argc, char** argv) {
         if (argc >= 3) {
             // Safe conversion from argv[2] to int
             try {
+                std::cout << "Using live mode with camera index: " << argv[2] << std::endl;
                 camera_index = std::stoi(argv[2]);
             } catch (const std::exception &e) {
                 std::cerr << "Invalid camera index '" << argv[2] << "': " << e.what()
@@ -101,6 +115,11 @@ int main(int argc, char** argv) {
         cmd_vx.y = alpha_cmd * cmd_vx.y + (1.0 - alpha_cmd) * last_cmd_vx.y;
         cmd_vx.z = alpha_cmd * cmd_vx.z + (1.0 - alpha_cmd) * last_cmd_vx.z;
 
+        if (!client.SendMetadata(cmd_vx.x, cmd_vx.y)) 
+        {
+            std::cerr << "Failed to send data. Check connection." << std::endl;
+            break;
+        }
 
         // Choose color based on z motion
         cv::Scalar color = (direction.z < 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);

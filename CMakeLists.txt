@@ -14,6 +14,7 @@ include_directories(${OpenCV_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include )
 add_executable(ImageMatcher
     src/main.cpp
     src/ImageMatcher.cpp
+    src/MetadataClient.cpp
 )
 
 target_link_libraries(ImageMatcher ${OpenCV_LIBS})
