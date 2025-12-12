@@ -3,6 +3,10 @@
 #include <iostream>
 #include <algorithm>
 #include "MetadataClient.h"
+#include "RtspReader.h"
+
+int imgWidth = 720;
+int imgHeight = 480;
 
 int main(int argc, char** argv) {
     // Choose input mode: "live" (default) or "stream <url>"
@@ -24,9 +28,15 @@ int main(int argc, char** argv) {
         if (argc >= 3) {
             stream_url = argv[2];
             std::cout << "Using stream URL: " << stream_url << std::endl;
-        } else {
-            // stream_url = "http://10.116.88.38:80";
-            stream_url = "rstp://172.28.240.1/mysream";
+        }
+        else if (argc == 2)
+        {
+           stream_url = "rtsp://10.116.88.38:8554/mystream";
+           std::cout << "Using default stream: " << stream_url << std::endl;
+        }
+        
+        else {
+            // stream_url = "rstp://172.28.240.1/mysream";
             std::cout << "Using default stream: " << stream_url << std::endl;
             std::cout << "Usage: " << argv[0] << " [live|stream] [stream_url]\n";
             return -1;
@@ -47,7 +57,7 @@ int main(int argc, char** argv) {
     }
 
     // Load target image
-    ImageMatcher matcher("../target.jpg");
+    ImageMatcher matcher("../Capture_20251212_123027.png");
     // Speed mapping (smooth saturating)
     float k = 0.02;              // tune
     float v_max = 1.0;           // m/s or drone units
@@ -77,27 +87,37 @@ int main(int argc, char** argv) {
                 return -1;
             }
         }
+        std::cout << "Stream / Camera can be opened" << std::endl;
         // prefer MJPEG/FourCC if stream provides it
         cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
     }
 
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
+    cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
     if (!cap.isOpened()) {
         std::cerr << "Error: Cannot open camera/stream" << std::endl;
         return -1;
     }
+    std::cout << " Camera/Stream opened" << std::endl;
 
+    // cv::Mat frame;
+    RtspReader reader(stream_url,imgWidth, imgHeight);
+
+    reader.start();
 
     cv::Mat frame;
     while (true) {
-        cap >> frame;
-        if (frame.empty()) break;
+        // cap >> frame;
+        if (!reader.getFrame(frame)) {
+            std::cout << "No available frame" << std::endl;
+            continue;}
 
         // Get alignment direction (x, y, z)
         double displacement = matcher.getAlignmentDisplacement(frame);
 
-        cv::Point3f direction = matcher.getAlignmentDirection();
+        std::cout << "Displacement"<< std::endl;
+
+        auto [rotation, direction]  = matcher.getAlignmentDirection();
         // cv::Point3f direction = cv::Point3f(0,0,0);
 
         // Speed mapping (smooth saturating)
@@ -115,7 +135,7 @@ int main(int argc, char** argv) {
         cmd_vx.y = alpha_cmd * cmd_vx.y + (1.0 - alpha_cmd) * last_cmd_vx.y;
         cmd_vx.z = alpha_cmd * cmd_vx.z + (1.0 - alpha_cmd) * last_cmd_vx.z;
 
-        if (!client.SendMetadata(cmd_vx.x, cmd_vx.y)) 
+        if (!client.SendMetadata(rotation.x, rotation.y)) 
         {
             std::cerr << "Failed to send data. Check connection." << std::endl;
             break;

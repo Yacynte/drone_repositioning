@@ -9,7 +9,7 @@ public:
 
     // Returns a direction vector (dx, dy) to align input image with target
     double getAlignmentDisplacement(const cv::Mat& inputImage);
-    cv::Point3f getAlignmentDirection(const cv::Mat& inputImage = cv::Mat());
+    std::pair<cv::Point3f, cv::Point3f> getAlignmentDirection(const cv::Mat& inputImage = cv::Mat());
 
 
 private:

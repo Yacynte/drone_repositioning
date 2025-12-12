@@ -71,7 +71,7 @@ double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     return d_pixels;
 }
 
-cv::Point3f ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
+std::pair<cv::Point3f, cv::Point3f>  ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
     if (!inputImage.empty()){
         cv::Mat inputGray;
         cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
@@ -84,7 +84,7 @@ cv::Point3f ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
         matcher->match(inputDescriptors, targetDescriptors, matches);
         // std::vector<cv::Point2f> inputMatches, targetMatches;
 
-        if (matches.empty()) return cv::Point3f(0,0,0);
+        if (matches.empty()) return {cv::Point3f(0,0,0), cv::Point3f(0,0,0)};
         for (const auto& m : matches) {
             const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
             const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
@@ -99,10 +99,17 @@ cv::Point3f ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
     double translation_norm = translation.at<double>(2,0);
     cv::Mat direction = (translation_norm > 1e-12) ? translation/translation_norm : cv::Mat::zeros(3,1, CV_64F);
     // std::cout << "Rotation Matrix: "<< rotationMatrix << std::endl;
-    cv::Mat world_direction = rotationMatrix * direction;
+    cv::Mat world_transfomation = rotationMatrix * direction;
 
-    return cv::Point3f( world_direction.at<double>(0,0), world_direction.at<double>(1,0), 
-                        world_direction.at<double>(2,0));
+    cv::Point3f world_direction = cv::Point3f( world_transfomation.at<double>(0,0), world_transfomation.at<double>(1,0), 
+                                                world_transfomation.at<double>(2,0));
+
+    cv::Mat world_rotation_mat = world_transfomation(cv::Rect(0, 0, 3, 3)).clone();
+    cv::Mat world_rotation_vec;
+    cv::Rodrigues(world_rotation_mat, world_rotation_vec);
+    cv::Point3f world_rotation = cv::Point3f( world_rotation_vec.at<double>(0,0), world_rotation_vec.at<double>(1,0), 
+                                                world_rotation_vec.at<double>(2,0));
+    return {world_rotation, world_direction};
 }
 
 void ImageMatcher::findAnddecomposeEssentialMatrix(cv::Mat& bestR, cv::Mat& bestT){

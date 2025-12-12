@@ -42,7 +42,7 @@ public:
     {
         CloseSocket();
     }
-    bool Connect(const std::string& ip = "172.28.240.1", int port = 9001);
+    bool Connect(const std::string& ip = "10.116.88.38", int port = 9001);
     bool SendMetadata(float alpha, float angle);
     /**
      * @brief Attempts to connect to the metadata server.
