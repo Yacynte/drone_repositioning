@@ -7,6 +7,9 @@
 
 int imgWidth = 720;
 int imgHeight = 480;
+bool unrealMode = true;
+double error = 1.0;
+double threshold_error = 5.0e-2;
 
 int main(int argc, char** argv) {
     // Choose input mode: "live" (default) or "stream <url>"
@@ -57,13 +60,18 @@ int main(int argc, char** argv) {
     }
 
     // Load target image
-    ImageMatcher matcher("../Capture_20251212_123027.png");
+    ImageMatcher matcher("../target.png");
     // Speed mapping (smooth saturating)
     float k = 0.02;              // tune
     float v_max = 1.0;           // m/s or drone units
     float v_min = 0.05;
+    double displacement = 0.0;
+    cv::Point3f direction = cv::Point3f(0,0,0);
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
     cv::Point3f cmd_vx = cv::Point3f(0,0,0);
+    cv::Point3f last_angle_rate = cv::Point3f(0,0,0);
+    cv::Point3f angle_rate_cmd = cv::Point3f(0,0,0);
+
 
     cv::VideoCapture cap;
 
@@ -104,67 +112,105 @@ int main(int argc, char** argv) {
     RtspReader reader(stream_url,imgWidth, imgHeight);
 
     reader.start();
-
     cv::Mat frame;
     while (true) {
         // cap >> frame;
         if (!reader.getFrame(frame)) {
             std::cout << "No available frame" << std::endl;
             continue;}
-
-        // Get alignment direction (x, y, z)
-        double displacement = matcher.getAlignmentDisplacement(frame);
-
-        std::cout << "Displacement"<< std::endl;
-
-        auto [rotation, direction]  = matcher.getAlignmentDirection();
-        // cv::Point3f direction = cv::Point3f(0,0,0);
-
-        // Speed mapping (smooth saturating)
-        float v = v_max * (1.0 - std::exp(-k * displacement));
-        v = clamp(v, v_min, v_max);
-
-        // Compose command
-        cmd_vx.x = v * direction.x;
-        cmd_vx.y = v * direction.y;
-        cmd_vx.z = v * direction.z;
-
-        // Smooth commands
-        float alpha_cmd = 0.3;
-        cmd_vx.x = alpha_cmd * cmd_vx.x + (1.0 - alpha_cmd) * last_cmd_vx.x;
-        cmd_vx.y = alpha_cmd * cmd_vx.y + (1.0 - alpha_cmd) * last_cmd_vx.y;
-        cmd_vx.z = alpha_cmd * cmd_vx.z + (1.0 - alpha_cmd) * last_cmd_vx.z;
-
-        if (!client.SendMetadata(rotation.x, rotation.y)) 
+        if (error > threshold_error)
         {
-            std::cerr << "Failed to send data. Check connection." << std::endl;
-            break;
+        
+            // Get alignment direction (x, y, z)
+            double displacement = matcher.getAlignmentDisplacement(frame);
+
+            auto [rotationMatrix, direction]  = matcher.getAlignmentDirection();
+            // cv::Point3f direction = cv::Point3f(0,0,0);
+            cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
+            cv::Mat diff = rotationMatrix - I;
+
+            error = cv::norm(diff);
+
+            cv::Mat world_rotation_vec;
+            cv::Rodrigues(rotationMatrix, world_rotation_vec);
+            cv::Mat axis = world_rotation_vec / cv::norm(world_rotation_vec);
+            double angle   = cv::norm(world_rotation_vec);
+            cv::Point3f rotation;
+
+            if (unrealMode){
+                rotation.x = axis.at<double>(2);
+                rotation.y = axis.at<double>(0);
+                rotation.z = -axis.at<double>(1);
+            }
+            else{
+                rotation.x = axis.at<double>(0);
+                rotation.y = axis.at<double>(1);
+                rotation.z = axis.at<double>(2);
+            }
+            
+
+
+            // Speed mapping (smooth saturating)
+            float v = v_max * (1.0 - std::exp(-k * displacement));
+            // double alpha = 1.0 - std::exp(-speed * dt);
+            v = clamp(v, v_min, v_max);
+
+            // Compose command
+            cmd_vx.x = v * direction.x;
+            cmd_vx.y = v * direction.y;
+            cmd_vx.z = v * direction.z;
+
+            angle_rate_cmd.x = v * rotation.x;
+            angle_rate_cmd.y = v * rotation.y;
+
+            // Smooth commands
+            float alpha_cmd = 0.3;
+            cmd_vx.x = alpha_cmd * cmd_vx.x + (1.0 - alpha_cmd) * last_cmd_vx.x;
+            cmd_vx.y = alpha_cmd * cmd_vx.y + (1.0 - alpha_cmd) * last_cmd_vx.y;
+            cmd_vx.z = alpha_cmd * cmd_vx.z + (1.0 - alpha_cmd) * last_cmd_vx.z;
+            
+            // angle_rate_cmd.x = alpha_cmd * angle_rate_cmd.x + (1.0 - alpha_cmd) * last_angle_rate.x;
+            // angle_rate_cmd.y = alpha_cmd * angle_rate_cmd.y + (1.0 - alpha_cmd) * last_angle_rate.y;
+
+            // std::cout << " rotation_x: " << angle_rate_cmd.x << " rotation_y: " << angle_rate_cmd.y << std::endl;
+            // std::cout << " direction_x: " << direction.x << " direction_y: " << direction.y<< std::endl;
+            std::cout << " Error: " << error << std::endl;
+        
+            if (!client.SendMetadata(rotation.x, rotation.y)) 
+            {
+                std::cerr << "Failed to send data. Check connection." << std::endl;
+                break;
+            }
+
+            last_cmd_vx = cmd_vx;
+            last_angle_rate = angle_rate_cmd;
+            // std::cout << "Metadata sent: rotation_z=" << rotation.z << ", rotation_y=" << rotation.y << std::endl;
         }
+        // // Choose color based on z motion
+        // cv::Scalar color = (direction.z < 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
 
-        // Choose color based on z motion
-        cv::Scalar color = (direction.z < 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
+        // // Draw arrow for x/y direction
+        // cv::Point center(frame.cols / 2, frame.rows / 2);
+        // cv::Point tip(
+        //     static_cast<int>(center.x + displacement*direction.x ), // scale factor for visibility
+        //     static_cast<int>(center.y + displacement*direction.y )
+        // );
 
-        // Draw arrow for x/y direction
-        cv::Point center(frame.cols / 2, frame.rows / 2);
-        cv::Point tip(
-            static_cast<int>(center.x + displacement*direction.x ), // scale factor for visibility
-            static_cast<int>(center.y + displacement*direction.y )
-        );
+        // cv::arrowedLine(frame, center, tip, color, 2, cv::LINE_AA, 0, 0.3);
 
-        cv::arrowedLine(frame, center, tip, color, 2, cv::LINE_AA, 0, 0.3);
+        // // Display info text
+        // std::string text = "dx=" + std::to_string(cmd_vx.x) +
+        //                    " dy=" + std::to_string(cmd_vx.y) +
+        //                    " dz=" + std::to_string(cmd_vx.z);
+        // cv::putText(frame, text, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
 
-        // Display info text
-        std::string text = "dx=" + std::to_string(cmd_vx.x) +
-                           " dy=" + std::to_string(cmd_vx.y) +
-                           " dz=" + std::to_string(cmd_vx.z);
-        cv::putText(frame, text, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
+        
+        // // Show live feed
+        // cv::imshow("Live Camera Alignment", frame);
+        // if (cv::waitKey(1) == 'q') break;
 
-        // Show live feed
-        cv::imshow("Live Camera Alignment", frame);
-        if (cv::waitKey(1) == 'q') break;
-
-        // std::cout << "Show Image. "<< std::endl;
-        // std::cout<< "Direction: " << direction << std::endl;
+        // // std::cout << "Show Image. "<< std::endl;
+        // // std::cout<< "Direction: " << direction << std::endl;
 
     }
 

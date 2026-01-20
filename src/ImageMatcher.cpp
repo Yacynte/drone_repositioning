@@ -22,12 +22,54 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
                     0,       0,      1.0f
                     );
     // Detect and compute features for target
-    detectAndCompute(targetImageGray, targetKeypoints, targetDescriptors);
+    detectAndComputegrid(targetImageGray, targetKeypoints, targetDescriptors);
 }
 
 void ImageMatcher::detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
     sift->detectAndCompute(image, cv::noArray(), keypoints, descriptors);
 }
+
+void ImageMatcher::detectAndComputegrid(const cv::Mat& image,
+                                    std::vector<cv::KeyPoint>& keypoints,
+                                    cv::Mat& descriptors,
+                                    int gridX,
+                                    int gridY,
+                                    int maxPerCell)
+{
+    // 1. Detect all keypoints
+    std::vector<cv::KeyPoint> allKeypoints;
+    sift->detect(image, allKeypoints);
+
+    // 2. Divide image into grid
+    int cellW = image.cols / gridX;
+    int cellH = image.rows / gridY;
+
+    std::vector<std::vector<cv::KeyPoint>> grid(gridX * gridY);
+
+    for (auto& kp : allKeypoints)
+    {
+        int ix = std::min(int(kp.pt.x / cellW), gridX - 1);
+        int iy = std::min(int(kp.pt.y / cellH), gridY - 1);
+        grid[iy * gridX + ix].push_back(kp);
+    }
+
+    // 3. Select top keypoints per cell
+    keypoints.clear();
+    for (auto& cell : grid)
+    {
+        // Sort by response (strength)
+        std::sort(cell.begin(), cell.end(),
+                  [](const cv::KeyPoint& a, const cv::KeyPoint& b) {
+                      return a.response > b.response;
+                  });
+        for (int i = 0; i < std::min(maxPerCell, (int)cell.size()); i++)
+            keypoints.push_back(cell[i]);
+    }
+
+    // 4. Compute descriptors for selected keypoints
+    sift->compute(image, keypoints, descriptors);
+}
+
 
 double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     cv::Mat inputGray;
@@ -35,18 +77,22 @@ double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
 
     std::vector<cv::KeyPoint> inputKeypoints;
     cv::Mat inputDescriptors;
-    detectAndCompute(inputGray, inputKeypoints, inputDescriptors);
+    detectAndComputegrid(inputGray, inputKeypoints, inputDescriptors);
 
-    std::vector<cv::DMatch> matches;
-    matcher->match(inputDescriptors, targetDescriptors, matches);
+    // std::vector<cv::DMatch> matches;
+    // matcher->match(inputDescriptors, targetDescriptors, matches);
 
-    if (matches.empty()) return 0;
+    std::vector<cv::DMatch> goodMatches;
+
+    goodMatches = goodMatcher(inputDescriptors);
+
+    if (goodMatches.empty()) return 0;
 
     cv::Point2f direction2D(0,0);
     float zMotion = 0; // inward/outward
     cv::Point2f center(inputGray.cols/2.0f, inputGray.rows/2.0f);
 
-    for (const auto& m : matches) {
+    for (const auto& m : goodMatches) {
         const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
         const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
         inputMatches.push_back(kpInput.pt);
@@ -63,65 +109,61 @@ double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
         // zMotion += (dot > 0) ? 1.0f : -1.0f;
     }
 
-    direction2D.x /= matches.size();
-    direction2D.y /= matches.size();
+    direction2D.x /= goodMatches.size();
+    direction2D.y /= goodMatches.size();
     // zMotion /= matches.size(); // average tendency
     double d_pixels = std::sqrt(direction2D.x*direction2D.x + direction2D.y*direction2D.y);
 
     return d_pixels;
 }
 
-std::pair<cv::Point3f, cv::Point3f>  ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
-    if (!inputImage.empty()){
-        cv::Mat inputGray;
-        cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
+std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptors) {
+    // KNN match to find the two best matches for each descriptor
+    std::vector<std::vector<cv::DMatch>> matchesAB;
+    matcher->knnMatch(inputDescriptors, targetDescriptors, matchesAB, 2);
+    std::vector<std::vector<cv::DMatch>> matchesBA;
+    matcher->knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
 
-        std::vector<cv::KeyPoint> inputKeypoints;
-        cv::Mat inputDescriptors;
-        detectAndCompute(inputGray, inputKeypoints, inputDescriptors);
+    // Apply Lowe's ratio test and cross-check
+    const float ratio = 0.75f;
 
-        std::vector<cv::DMatch> matches;
-        matcher->match(inputDescriptors, targetDescriptors, matches);
-        // std::vector<cv::Point2f> inputMatches, targetMatches;
+    std::vector<cv::DMatch> goodAB, goodBA;
 
-        if (matches.empty()) return {cv::Point3f(0,0,0), cv::Point3f(0,0,0)};
-        for (const auto& m : matches) {
-            const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
-            const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
+    for (const auto& m : matchesAB)
+        if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
+            goodAB.push_back(m[0]);
 
-            inputMatches.push_back(kpInput.pt);
-            targetMatches.push_back(kpTarget.pt);
+    for (const auto& m : matchesBA)
+        if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
+            goodBA.push_back(m[0]);
+
+    // Cross-check: keep only matches that are mutual best matches
+    std::vector<cv::DMatch> crossCheckedMatches;
+    for (const auto& mAB : goodAB)
+    {
+        for (const auto& mBA : goodBA)
+        {
+            if (mAB.queryIdx == mBA.trainIdx &&
+                mAB.trainIdx == mBA.queryIdx)
+            {
+                crossCheckedMatches.push_back(mAB);
+                break;
+            }
         }
     }
-    cv::Mat translation, rotationMatrix;
-    ImageMatcher::findAnddecomposeEssentialMatrix(rotationMatrix, translation);
-    // double translation_norm = cv::norm(translation);
-    double translation_norm = translation.at<double>(2,0);
-    cv::Mat direction = (translation_norm > 1e-12) ? translation/translation_norm : cv::Mat::zeros(3,1, CV_64F);
-    // std::cout << "Rotation Matrix: "<< rotationMatrix << std::endl;
-    cv::Mat world_transfomation = rotationMatrix * direction;
-
-    cv::Point3f world_direction = cv::Point3f( world_transfomation.at<double>(0,0), world_transfomation.at<double>(1,0), 
-                                                world_transfomation.at<double>(2,0));
-
-    cv::Mat world_rotation_mat = world_transfomation(cv::Rect(0, 0, 3, 3)).clone();
-    cv::Mat world_rotation_vec;
-    cv::Rodrigues(world_rotation_mat, world_rotation_vec);
-    cv::Point3f world_rotation = cv::Point3f( world_rotation_vec.at<double>(0,0), world_rotation_vec.at<double>(1,0), 
-                                                world_rotation_vec.at<double>(2,0));
-    return {world_rotation, world_direction};
+    return crossCheckedMatches;
 }
 
-void ImageMatcher::findAnddecomposeEssentialMatrix(cv::Mat& bestR, cv::Mat& bestT){
+void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT){
     
     cv::Mat EssentialMat = cv::findEssentialMat(
-                        inputMatches,     // std::vector<cv::Point2f> from current frame
-                        targetMatches,    // std::vector<cv::Point2f> from target image
-                        cameraMatrix,    // 3x3 intrinsic matrix
-                        cv::RANSAC,      // method
-                        0.999,           // confidence
-                        0.1              // reprojection threshold in pixels
-                    );
+                                inputMatches,     // std::vector<cv::Point2f> from current frame
+                                targetMatches,    // std::vector<cv::Point2f> from target image
+                                cameraMatrix,    // 3x3 intrinsic matrix
+                                cv::RANSAC,      // method
+                                0.999,           // confidence
+                                0.1              // reprojection threshold in pixels
+                            );
     // std::cout << "Computed Essential Matrix" << std::endl;
     cv::Mat R1, R2, t;
     cv::decomposeEssentialMat(EssentialMat, R1, R2, t);
@@ -144,6 +186,90 @@ void ImageMatcher::findAnddecomposeEssentialMatrix(cv::Mat& bestR, cv::Mat& best
             bestT = tCandidate.clone();
         }
     }
+}
+
+
+std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
+    if (!inputImage.empty()){
+        cv::Mat inputGray;
+        cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
+        // std::cout << "Converted to Gray" << std::endl;
+        std::vector<cv::KeyPoint> inputKeypoints;
+        cv::Mat inputDescriptors;
+        detectAndCompute(inputGray, inputKeypoints, inputDescriptors);
+        // std::cout << "Computed Keypoints and Descriptors" << std::endl;
+        std::vector<cv::DMatch> goodMatches;
+        goodMatches = goodMatcher(inputDescriptors);
+        // matcher->match(inputDescriptors, targetDescriptors, matches);
+        // std::vector<cv::Point2f> inputMatches, targetMatches;
+        // std::cout << "Matched Descriptors" << std::endl;
+        if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0)};
+        for (const auto& m : goodMatches) {
+            const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
+            const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
+
+            inputMatches.push_back(kpInput.pt);
+            targetMatches.push_back(kpTarget.pt);
+        }
+        // std::cout << "Prepared Matches" << std::endl;
+    }
+    cv::Mat translation, rotationMatrix;
+    // std::cout << "Find translation " << std::endl;
+    findAnddecomposeEssentialMat(rotationMatrix, translation);
+    //
+    // findAnddecomposeEssentialMat(rotationMatrix, translation);
+    // std::cout << "Translation Vector " << std::endl;
+    // double translation_norm = cv::norm(translation);
+    double translation_norm = translation.at<double>(2,0);
+    cv::Mat direction = (translation_norm > 1e-12) ? translation/translation_norm : cv::Mat::zeros(3,1, CV_64F);
+    // std::cout << "Rotation Matrix: "<< rotationMatrix << std::endl;
+    cv::Mat world_transformation = rotationMatrix * direction;
+    // std::cout << "World rotation matrix" << rotationMatrix << std::endl;
+    // std::cout << "World Direction Vector " << direction << std::endl;
+    // std::cout << "World Transformation Matrix " << world_transformation << std::endl;
+    cv::Point3f world_direction = cv::Point3f( world_transformation.at<double>(0,0), world_transformation.at<double>(1,0), 
+                                                world_transformation.at<double>(2,0));
+
+    // cv::Mat world_rotation_mat = world_transformation(cv::Rect(0, 0, 3, 3)).clone();
+    // std::cout << "World Rotation Matrix " << rotationMatrix << std::endl;
+    // cv::Mat world_rotation_vec;
+    // cv::Rodrigues(rotationMatrix, world_rotation_vec);
+
+    // cv::Vec3d axis = world_rotation_vec / cv::norm(world_rotation_vec);
+    // double angle   = cv::norm(world_rotation_vec);
+    // double roll, pitch, yaw;
+
+    // pitch = std::asin(-rotationMatrix.at<double>(2,0));
+
+    // if (std::abs(std::cos(pitch)) > 1e-6) {
+    //     roll = std::atan2(rotationMatrix.at<double>(2,1), rotationMatrix.at<double>(2,2));
+    //     yaw  = std::atan2(rotationMatrix.at<double>(1,0), rotationMatrix.at<double>(0,0));
+    // } else {
+    //     // gimbal lock
+    //     roll = std::atan2(-rotationMatrix.at<double>(1,2), rotationMatrix.at<double>(1,1));
+    //     yaw = 0.0;
+    // }
+
+    // // const double rad2deg = 180.0 / CV_PI;
+    // // roll  *= rad2deg;
+    // // pitch *= rad2deg;
+    // // yaw   *= rad2deg;
+
+    // double roll_ue  = -pitch;
+    // double pitch_ue =  yaw;
+    // double yaw_ue   = -roll;
+
+    // cv::Point3f Motion;
+    // Motion.x =  std::cos(pitch_ue) * std::cos(yaw_ue);
+    // Motion.y =  std::cos(pitch_ue) * std::sin(yaw_ue);
+    // Motion.z =  std::sin(pitch_ue);
+
+    // std::cout << "World Rotation Vector Matrix " << std::endl;
+    // cv::Point3f world_rotation = cv::Point3f( Motion.x, Motion.y, std::sin(pitch));
+    // std::cout << " return World Rotation Vector " << std::endl;
+    
+    
+    return {rotationMatrix, world_direction};
 }
 
 cv::Mat ImageMatcher::formTransf(const cv::Mat& R, const cv::Mat& t) {
