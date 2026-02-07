@@ -23,6 +23,7 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
                     );
     // Detect and compute features for target
     detectAndComputegrid(targetImageGray, targetKeypoints, targetDescriptors);
+    std::cout << "Target keypoints size: " << targetKeypoints.size() << std::endl;
 }
 
 void ImageMatcher::detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
@@ -43,7 +44,7 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image,
     // 2. Divide image into grid
     int cellW = image.cols / gridX;
     int cellH = image.rows / gridY;
-
+    std::cout << "All Keypoints detected: " << allKeypoints.size() << std::endl;
     std::vector<std::vector<cv::KeyPoint>> grid(gridX * gridY);
 
     for (auto& kp : allKeypoints)
@@ -71,7 +72,7 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image,
 }
 
 
-double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
+float ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     cv::Mat inputGray;
     cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
 
@@ -83,11 +84,11 @@ double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     // matcher->match(inputDescriptors, targetDescriptors, matches);
 
     std::vector<cv::DMatch> goodMatches;
-
+    std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
     goodMatches = goodMatcher(inputDescriptors);
-
-    if (goodMatches.empty()) return 0;
-
+    std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
+    if (goodMatches.empty()) return 0; // cv::Point3f(0,0,0);
+    
     cv::Point2f direction2D(0,0);
     float zMotion = 0; // inward/outward
     cv::Point2f center(inputGray.cols/2.0f, inputGray.rows/2.0f);
@@ -103,18 +104,20 @@ double ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
         // Inward/outward: dot product with vector from center
         cv::Point2f vecToCenter = kpInput.pt - center;
         cv::Point2f motionVec = kpTarget.pt - kpInput.pt;
-        // float dot = vecToCenter.dot(motionVec);
+        float dot = vecToCenter.dot(motionVec);
 
-        // // If dot > 0 → moving outward, dot < 0 → moving inward
-        // zMotion += (dot > 0) ? 1.0f : -1.0f;
+        // If dot > 0 → moving outward, dot < 0 → moving inward
+        zMotion += (dot > 0) ? 1.0f : -1.0f;
     }
 
     direction2D.x /= goodMatches.size();
     direction2D.y /= goodMatches.size();
-    // zMotion /= matches.size(); // average tendency
-    double d_pixels = std::sqrt(direction2D.x*direction2D.x + direction2D.y*direction2D.y);
-
-    return d_pixels;
+    zMotion /= goodMatches.size(); // average tendency
+    // double d_pixels = std::sqrt(direction2D.x*direction2D.x + direction2D.y*direction2D.y);
+    float dist_z = cv::norm(direction2D);
+    // zMotion *= dist_z; // scale by overall motion magnitude
+    // return cv::Point3f(direction2D.x, direction2D.y, zMotion);
+    return zMotion;
 }
 
 std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptors) {
@@ -219,16 +222,15 @@ std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(const cv::Ma
     //
     // findAnddecomposeEssentialMat(rotationMatrix, translation);
     // std::cout << "Translation Vector " << std::endl;
-    // double translation_norm = cv::norm(translation);
-    double translation_norm = translation.at<double>(2,0);
+    double translation_norm = cv::norm(translation);
+    // double translation_norm = translation.at<double>(2,0);
     cv::Mat direction = (translation_norm > 1e-12) ? translation/translation_norm : cv::Mat::zeros(3,1, CV_64F);
     // std::cout << "Rotation Matrix: "<< rotationMatrix << std::endl;
     cv::Mat world_transformation = rotationMatrix * direction;
     // std::cout << "World rotation matrix" << rotationMatrix << std::endl;
     // std::cout << "World Direction Vector " << direction << std::endl;
     // std::cout << "World Transformation Matrix " << world_transformation << std::endl;
-    cv::Point3f world_direction = cv::Point3f( world_transformation.at<double>(0,0), world_transformation.at<double>(1,0), 
-                                                world_transformation.at<double>(2,0));
+    cv::Point3f world_direction = cv::Point3f( direction.at<double>(0,0), direction.at<double>(1,0), direction.at<double>(2,0));
 
     // cv::Mat world_rotation_mat = world_transformation(cv::Rect(0, 0, 3, 3)).clone();
     // std::cout << "World Rotation Matrix " << rotationMatrix << std::endl;
@@ -335,3 +337,85 @@ int ImageMatcher::sumZCalRelativeScale(const cv::Mat& Rotation, const cv::Mat& t
 
         return positiveZ;
     }
+
+
+
+cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputImage)
+{
+    cv::Mat inputGray;
+    cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
+
+    std::vector<cv::KeyPoint> inputKeypoints;
+    cv::Mat inputDescriptors;
+    detectAndComputegrid(inputGray, inputKeypoints, inputDescriptors);
+
+    // std::vector<cv::DMatch> matches;
+    // matcher->match(inputDescriptors, targetDescriptors, matches);
+
+    std::vector<cv::DMatch> goodMatches;
+    // std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
+    goodMatches = goodMatcher(inputDescriptors);
+    // std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
+    if (goodMatches.empty()) return cv::Point3f(0,0,0);
+
+    for (const auto& m : goodMatches) {
+        const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
+        const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
+        inputMatches.push_back(kpInput.pt);
+        targetMatches.push_back(kpTarget.pt);
+    }
+
+    // Robust affine (rotation + uniform scale + translation), rejects outliers
+    cv::Mat inliers;
+    cv::Mat A = cv::estimateAffinePartial2D(
+        inputMatches, targetMatches, inliers,
+        cv::RANSAC,
+        3.0,     // reprojection threshold in pixels (tune: 2-5 px)
+        2000,    // max iterations
+        0.99,    // confidence
+        10       // refine iterations
+    );
+
+    if (A.empty()) return cv::Point3f(0, 0, 0);
+
+    // Count inliers (optional safety)
+    int inlierCount = 0;
+    for (int i = 0; i < inliers.rows; ++i) inlierCount += (inliers.at<uchar>(i) != 0);
+    if (inlierCount < 8) return cv::Point3f(0, 0, 0);
+
+    // A is 2x3:
+    // [ a b tx ]
+    // [ c d ty ]
+    double a = A.at<double>(0,0);
+    double b = A.at<double>(0,1);
+    double c = A.at<double>(1,0);
+    double d = A.at<double>(1,1);
+    double tx = A.at<double>(0,2);
+    double ty = A.at<double>(1,2);
+
+    // For estimateAffinePartial2D, scale is (roughly) uniform:
+    // scale = sqrt(a^2 + c^2)  (also ~= sqrt(b^2 + d^2))
+    double s = std::sqrt(a*a + c*c);
+
+    // "z error" as zoom proxy:
+    // s > 1 means target looks bigger than input (zoom-in / closer)
+    // Use log(s) so it's symmetric: log(1.1)=+0.095, log(0.9)=-0.105
+    double z = std::log(std::max(s, 1e-6));
+
+    // Return (x,y) in pixels and z as dimensionless zoom error
+    // return cv::Point3f((float)tx, (float)ty, (float)z);
+    // rotation (radians)
+    double theta = std::atan2(c, a);
+
+    // center displacement (pixels)
+    cv::Point2f center(inputGray.cols * 0.5f, inputGray.rows * 0.5f);
+    double cx = center.x, cy = center.y;
+    double cxp = a*cx + b*cy + tx;
+    double cyp = c*cx + d*cy + ty;
+
+    double dxc = cxp - cx;
+    double dyc = cyp - cy;
+
+    // Return center shift, and zoom proxy
+    return cv::Point3f((float)dxc, (float)dyc, (float)z);
+}

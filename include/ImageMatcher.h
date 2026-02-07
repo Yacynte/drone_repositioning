@@ -8,7 +8,8 @@ public:
     ImageMatcher(const std::string& targetImagePath);
 
     // Returns a direction vector (dx, dy) to align input image with target
-    double getAlignmentDisplacement(const cv::Mat& inputImage);
+    float getAlignmentDisplacement(const cv::Mat& inputImage);
+    cv::Point3f getAlignmentDisplacementRansac(const cv::Mat& inputImage);
     std::pair<cv::Mat, cv::Point3f> getAlignmentDirection(const cv::Mat& inputImage = cv::Mat());
 
 
@@ -28,7 +29,7 @@ private:
                                     cv::Mat& descriptors,
                                     int gridX = 8,
                                     int gridY = 8,
-                                    int maxPerCell = 5);
+                                    int maxPerCell = 50);
     void findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT);
     cv::Mat formTransf(const cv::Mat& R, const cv::Mat& t);
     int sumZCalRelativeScale(const cv::Mat& R, const cv::Mat& t);

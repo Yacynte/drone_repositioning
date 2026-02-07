@@ -3,7 +3,7 @@
 #include <sstream>
 #include <vector>
 #include <cstring>  // For std::strerror
-
+#include "AlgoLogger.hpp"
 // --- POSIX Sockets Headers ---
 #include <sys/socket.h> // For socket(), connect(), send(), etc.
 #include <netinet/in.h> // For sockaddr_in structure
@@ -43,7 +43,7 @@ public:
         CloseSocket();
     }
     bool Connect(const std::string& ip = "10.116.88.38", int port = 9001);
-    bool SendMetadata(float alpha, float angle);
+    bool SendMetadata(const std::string& data_to_send);
     /**
      * @brief Attempts to connect to the metadata server.
      * @param ip The target IP address (e.g., "127.0.0.1").

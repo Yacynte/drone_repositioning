@@ -4,16 +4,46 @@
 #include <algorithm>
 #include "MetadataClient.h"
 #include "RtspReader.h"
+#include "AlgoLogger.hpp"
+#include "Utils.hpp"
+#include <cmath>
+#include <sstream>
+#include <iomanip>
+#include <string>
 
 int imgWidth = 720;
 int imgHeight = 480;
 bool unrealMode = true;
-double error = 1.0;
-double threshold_error = 5.0e-2;
+double error_ang = 1.0;
+double threshold_error = 0.05;
+double error_dist = imgWidth;
+double dist_threshold = 0.1 * cv::norm(cv::Point2f(imgHeight, imgWidth));
+// double displacement = imgWidth; // initial large displacement
+using Clock = std::chrono::steady_clock;
 
+// Convert a double to a string where the decimal point is replaced with '_'.
+// Example: 11829.695398 -> "11829_695398"
+static std::string timeToUnderscoreString(int precision = 6) {
+    const auto t_now = Clock::now().time_since_epoch();
+    double value = std::chrono::duration<double>(t_now).count();
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    std::string s = oss.str();
+    // Trim trailing zeros after the decimal point
+    auto pos = s.find('.');
+    if (pos != std::string::npos) {
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if (!s.empty() && s.back() == '.') s.pop_back();
+    }
+    std::replace(s.begin(), s.end(), '.', '_');
+    return s;
+}
 int main(int argc, char** argv) {
+    
+    std::string logFile = "AlgoLog_" + timeToUnderscoreString() + ".csv";
+    AlgoLogger logger(logFile, /*write_header=*/true, /*flush_every_n=*/30);
     // Choose input mode: "live" (default) or "stream <url>"
-     MetadataTcpClient client;
+    MetadataTcpClient client;
     
     // 1. Connect (Uses default 127.0.0.1:9001)
     if (!client.Connect()) {
@@ -62,10 +92,20 @@ int main(int argc, char** argv) {
     // Load target image
     ImageMatcher matcher("../target.png");
     // Speed mapping (smooth saturating)
+    // Smoothing factors
+    int increment = 0;
+    std::string data_to_send = "";
     float k = 0.02;              // tune
-    float v_max = 1.0;           // m/s or drone units
-    float v_min = 0.05;
-    double displacement = 0.0;
+    float k_yaw = 0.02;
+    float k_pitch = 0.02;
+    float tau = 0.25f;
+    double last_frame = 0;
+    double time_now = 0 ;
+    double old_img_ts = 0;
+
+    float v_max_ = 20.0;           // cm/s or drone units
+    float yaw_rate_max_ = 10;             // degrees/s
+    float pitch_rate_max = 2;
     cv::Point3f direction = cv::Point3f(0,0,0);
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
     cv::Point3f cmd_vx = cv::Point3f(0,0,0);
@@ -107,10 +147,9 @@ int main(int argc, char** argv) {
         return -1;
     }
     std::cout << " Camera/Stream opened" << std::endl;
-
+    float diag = std::sqrt(imgHeight*imgHeight + imgWidth*imgWidth);
     // cv::Mat frame;
     RtspReader reader(stream_url,imgWidth, imgHeight);
-
     reader.start();
     cv::Mat frame;
     while (true) {
@@ -118,74 +157,123 @@ int main(int argc, char** argv) {
         if (!reader.getFrame(frame)) {
             std::cout << "No available frame" << std::endl;
             continue;}
-        if (error > threshold_error)
-        {
+        // When image arrives:
+        double img_ts = AlgoLogger::nowSec();
+        // std::cout << "Processing frame for alignment..." << std::endl;
+        // Get alignment direction (x, y, z)
+        // auto displacement = matcher.getAlignmentDisplacement(frame);
         
-            // Get alignment direction (x, y, z)
-            double displacement = matcher.getAlignmentDisplacement(frame);
+        auto displacement = matcher.getAlignmentDisplacementRansac(frame);
+        // std::cout << " Displacement (pixels): " << displacement << std::endl;
+        // std::cout << "Processing frame for Rotation..." << std::endl;
+        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection();
 
-            auto [rotationMatrix, direction]  = matcher.getAlignmentDirection();
-            // cv::Point3f direction = cv::Point3f(0,0,0);
-            cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
-            cv::Mat diff = rotationMatrix - I;
+        // cv::Point3f direction = cv::Point3f(0,0,0);
+        cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
+        cv::Mat diff = rotationMatrix - I;
 
-            error = cv::norm(diff);
+        error_ang = cv::norm(diff);
+        error_dist = cv::norm(displacement);
 
-            cv::Mat world_rotation_vec;
-            cv::Rodrigues(rotationMatrix, world_rotation_vec);
-            cv::Mat axis = world_rotation_vec / cv::norm(world_rotation_vec);
-            double angle   = cv::norm(world_rotation_vec);
-            cv::Point3f rotation;
+        cv::Mat world_rotation_vec;
+        cv::Rodrigues(rotationMatrix, world_rotation_vec);
+        world_rotation_vec.convertTo(world_rotation_vec, CV_64F);
+        YPRDeg rotation_vec = rotmatToYPRDeg_ZYX(rotationMatrix);
 
-            if (unrealMode){
-                rotation.x = axis.at<double>(2);
-                rotation.y = axis.at<double>(0);
-                rotation.z = -axis.at<double>(1);
-            }
-            else{
-                rotation.x = axis.at<double>(0);
-                rotation.y = axis.at<double>(1);
-                rotation.z = axis.at<double>(2);
-            }
-            
+        cv::Mat axis = world_rotation_vec / cv::norm(world_rotation_vec);
+        float angle = cv::norm(world_rotation_vec) * (180.0f / CV_PI); // degrees
+        cv::Point3f rotation, translation;
 
-
-            // Speed mapping (smooth saturating)
-            float v = v_max * (1.0 - std::exp(-k * displacement));
-            // double alpha = 1.0 - std::exp(-speed * dt);
-            v = clamp(v, v_min, v_max);
-
-            // Compose command
-            cmd_vx.x = v * direction.x;
-            cmd_vx.y = v * direction.y;
-            cmd_vx.z = v * direction.z;
-
-            angle_rate_cmd.x = v * rotation.x;
-            angle_rate_cmd.y = v * rotation.y;
-
-            // Smooth commands
-            float alpha_cmd = 0.3;
-            cmd_vx.x = alpha_cmd * cmd_vx.x + (1.0 - alpha_cmd) * last_cmd_vx.x;
-            cmd_vx.y = alpha_cmd * cmd_vx.y + (1.0 - alpha_cmd) * last_cmd_vx.y;
-            cmd_vx.z = alpha_cmd * cmd_vx.z + (1.0 - alpha_cmd) * last_cmd_vx.z;
-            
-            // angle_rate_cmd.x = alpha_cmd * angle_rate_cmd.x + (1.0 - alpha_cmd) * last_angle_rate.x;
-            // angle_rate_cmd.y = alpha_cmd * angle_rate_cmd.y + (1.0 - alpha_cmd) * last_angle_rate.y;
-
-            // std::cout << " rotation_x: " << angle_rate_cmd.x << " rotation_y: " << angle_rate_cmd.y << std::endl;
-            // std::cout << " direction_x: " << direction.x << " direction_y: " << direction.y<< std::endl;
-            std::cout << " Error: " << error << std::endl;
+        // usage
+        double yawErr   = wrapDeg(rotation_vec.yaw);
+        double pitchErr = wrapDeg(rotation_vec.pitch);
+        double rollErr  = wrapDeg(rotation_vec.roll);
         
-            if (!client.SendMetadata(rotation.x, rotation.y)) 
+        float yaw_rate_max = yaw_rate_max_ * (1.f - std::exp(- k_yaw * angle));
+        float v_max = v_max_ * (1.f - std::exp(- k * cv::norm(displacement)));
+        std::cout << "Max yaw rate: " << yaw_rate_max << ", Angle: " << angle << std::endl;
+        double yawRateCmd   = tanhRate(yawErr,   yaw_rate_max, k_yaw);  // deg/s
+        double pitchRateCmd = tanhRate(pitchErr, yaw_rate_max, k_yaw);
+        double rollRateCmd  = tanhRate(rollErr,  yaw_rate_max, k_yaw);
+
+        if (unrealMode){
+            // rotation.x = axis.at<double>(2) * angle;
+            // rotation.y = axis.at<double>(0) * angle;
+            // rotation.z = -axis.at<double>(1) * angle;
+            angle_rate_cmd.x = yawRateCmd;
+            angle_rate_cmd.y = rollRateCmd;
+            angle_rate_cmd.z = -pitchRateCmd;
+
+            translation.x = displacement.z; 
+            translation.y = displacement.x;
+            translation.z = -displacement.y;
+        }
+        else{
+            rotation.x = axis.at<double>(0);
+            rotation.y = axis.at<double>(1);
+            rotation.z = axis.at<double>(2);
+            translation = displacement;
+        }
+        
+        cmd_vx.x = v_max * std::tanh(k * translation.x);
+        cmd_vx.y = v_max * std::tanh(k * translation.y);
+        cmd_vx.z = v_max * std::tanh(k * translation.z);
+
+        // yaw/pitch rate from angular error (separate gains!)
+        // angle_rate_cmd.x = yaw_rate_max * std::tanh(k_yaw   * rotation.x);
+        // angle_rate_cmd.y = pitch_rate_max * std::tanh(k_pitch * rotation.y);
+
+        // if (old_img_ts != 0) dt = img_ts - old_img_ts;
+        // dt-based smoothing
+        // float alpha = 1.f - std::exp(- k_yaw * angle);
+        float alpha = 0.3;
+
+        cmd_vx = alpha * cmd_vx + (1 - alpha) * last_cmd_vx;
+        angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
+
+        // std::cout << " rotation_x: " << angle_rate_cmd.x << " rotation_y: " << angle_rate_cmd.y << std::endl;
+        // std::cout << " direction_x: " << direction.x << " direction_y: " << direction.y<< std::endl;
+        // std::cout << " cmd_vx_x: " << cmd_vx.x << " cmd_vx_y: " << cmd_vx.y << " cmd_vx_z: " << cmd_vx.z << std::endl;
+        // std::cout << "Displacement: " << translation.x << translation.y << translation.z << std::endl;
+        std::cout << " Error: " << error_ang << " Error dist: " << error_dist << " YawErr: " << yawErr << " PitchErr: " << pitchErr << " RollErr: " << rollErr << std::endl;
+        std::stringstream ss;
+        // YawRate_cam, PitchRate_cam, YawRate_drone, drone_x, drone_y, drone_z \n 
+        // ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "\n";
+        // std::string data_0 = ss.str();  
+          
+        double send_ts = 0;
+        if (error_dist > dist_threshold){
+            ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "\n";
+            data_to_send = ss.str();
+        }
+        else if (error_ang > threshold_error){
+            ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "\n";
+            data_to_send = ss.str();
+        }
+        if (data_to_send != "" ){
+            if (!client.SendMetadata(data_to_send)) 
             {
                 std::cerr << "Failed to send data. Check connection." << std::endl;
                 break;
             }
-
-            last_cmd_vx = cmd_vx;
-            last_angle_rate = angle_rate_cmd;
-            // std::cout << "Metadata sent: rotation_z=" << rotation.z << ", rotation_y=" << rotation.y << std::endl;
+            send_ts = AlgoLogger::nowSec();
+            std::cout << "Data sent: " << data_to_send << std::endl;
+            // increment = 0;
+            last_frame = img_ts;
+            data_to_send = "";
+        }  
+        else { time_now = AlgoLogger::nowSec();}
+        // optional parse (so you can graph cmd5 easily)
+        auto parsed = AlgoLogger::parseCommand6(data_to_send);
+        logger.log(img_ts, send_ts, angle_rate_cmd, cmd_vx, data_to_send, parsed);
+        if( time_now - last_frame >= 1) {
+            std::cout << "Arrived at destination" << std::endl;
+            break;
         }
+        last_cmd_vx = cmd_vx;
+        last_angle_rate = angle_rate_cmd;
+        // old_img_ts = img_ts;
+        // std::cout << "Metadata sent: rotation_z=" << rotation.z << ", rotation_y=" << rotation.y << std::endl;
         // // Choose color based on z motion
         // cv::Scalar color = (direction.z < 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
 
@@ -215,6 +303,6 @@ int main(int argc, char** argv) {
     }
 
     cap.release();
-    cv::destroyAllWindows();
+    // cv::destroyAllWindows();
     return 0;
 }

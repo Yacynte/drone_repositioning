@@ -39,7 +39,7 @@ bool MetadataTcpClient::Connect(const std::string& ip, int port)
 }
 
     
-bool MetadataTcpClient::SendMetadata(float roll, float pitch)
+bool MetadataTcpClient::SendMetadata(const std::string& data_to_send)
     {
         if (client_socket == INVALID_SOCKET) {
             std::cerr << "Error: Not connected. Call Connect() first." << std::endl;
@@ -47,9 +47,9 @@ bool MetadataTcpClient::SendMetadata(float roll, float pitch)
         }
 
         // Format the data as a string: "Alpha,Angle\n"
-        std::stringstream ss;
-        ss << roll << "," << pitch << "\n";
-        std::string data_to_send = ss.str();
+        // std::stringstream ss;
+        // ss << roll << "," << pitch << "\n";
+        // std::string data_to_send = ss.str();
 
         // Convert string to char array and get size
         const char* send_buf = data_to_send.c_str();
@@ -114,8 +114,11 @@ static void TestClient()
         current_angle += 10.0f;
         
         std::cout << "Attempting to send: " << current_alpha << "," << current_angle << std::endl;
+        std::stringstream ss;
+        ss << current_alpha << "," << current_angle << "\n";
+        std::string data_to_send = ss.str();
 
-        if (!client.SendMetadata(current_alpha, current_angle)) 
+        if (!client.SendMetadata(data_to_send)) 
         {
             std::cerr << "Failed to send data. Check connection." << std::endl;
             break;

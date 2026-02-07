@@ -56,7 +56,7 @@ void RtspReader::readerLoop() {
     while (running_) {
         size_t bytes = fread(buffer.data(), 1, frameSize_, pipe_);
         if (bytes < frameSize_) {
-            printf("WARN: Incomplete frame or stream ended.\n");
+            // printf("WARN: Incomplete frame or stream ended.\n");
             continue;
         }
 
