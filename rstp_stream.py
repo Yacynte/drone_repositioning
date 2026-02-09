@@ -16,6 +16,9 @@ def main():
             break
 
         # Just show frame shape (no GUI)
+        cv2.imshow("reading frame", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
         print(f"Frame {x}: {frame.shape}")
         x += 1
 

@@ -11,14 +11,15 @@
 #include <iomanip>
 #include <string>
 
-int imgWidth = 720;
+int imgWidth = 640;
 int imgHeight = 480;
 bool unrealMode = true;
 double error_ang = 1.0;
-double threshold_error = 0.05;
-double error_dist = imgWidth;
+double threshold_error = 5e-2;;
+// double error_dist = 1.0;
+// double dist_threshold = 1e-3;
 double dist_threshold = 0.1 * cv::norm(cv::Point2f(imgHeight, imgWidth));
-// double displacement = imgWidth; // initial large displacement
+double error_dist = imgWidth; // initial large displacement
 using Clock = std::chrono::steady_clock;
 
 // Convert a double to a string where the decimal point is replaced with '_'.
@@ -104,7 +105,7 @@ int main(int argc, char** argv) {
     double old_img_ts = 0;
 
     float v_max_ = 20.0;           // cm/s or drone units
-    float yaw_rate_max_ = 10;             // degrees/s
+    float yaw_rate_max = 100;             // degrees/s
     float pitch_rate_max = 2;
     cv::Point3f direction = cv::Point3f(0,0,0);
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
@@ -162,19 +163,15 @@ int main(int argc, char** argv) {
         // std::cout << "Processing frame for alignment..." << std::endl;
         // Get alignment direction (x, y, z)
         // auto displacement = matcher.getAlignmentDisplacement(frame);
-        
-        auto displacement = matcher.getAlignmentDisplacementRansac(frame);
+        cv::Point3f displacement;
+        // auto displacement = matcher.getAlignmentDisplacementRansac(frame);
         // std::cout << " Displacement (pixels): " << displacement << std::endl;
         // std::cout << "Processing frame for Rotation..." << std::endl;
-        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection();
+        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection(displacement, frame);
 
         // cv::Point3f direction = cv::Point3f(0,0,0);
         cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
         cv::Mat diff = rotationMatrix - I;
-
-        error_ang = cv::norm(diff);
-        error_dist = cv::norm(displacement);
-
         cv::Mat world_rotation_vec;
         cv::Rodrigues(rotationMatrix, world_rotation_vec);
         world_rotation_vec.convertTo(world_rotation_vec, CV_64F);
@@ -189,7 +186,7 @@ int main(int argc, char** argv) {
         double pitchErr = wrapDeg(rotation_vec.pitch);
         double rollErr  = wrapDeg(rotation_vec.roll);
         
-        float yaw_rate_max = yaw_rate_max_ * (1.f - std::exp(- k_yaw * angle));
+        // float yaw_rate_max = yaw_rate_max_ * (1.f - std::exp(- k_yaw * angle));
         float v_max = v_max_ * (1.f - std::exp(- k * cv::norm(displacement)));
         std::cout << "Max yaw rate: " << yaw_rate_max << ", Angle: " << angle << std::endl;
         double yawRateCmd   = tanhRate(yawErr,   yaw_rate_max, k_yaw);  // deg/s
@@ -204,9 +201,9 @@ int main(int argc, char** argv) {
             angle_rate_cmd.y = rollRateCmd;
             angle_rate_cmd.z = -pitchRateCmd;
 
-            translation.x = displacement.z; 
-            translation.y = displacement.x;
-            translation.z = -displacement.y;
+            translation.x = direction1.z; 
+            translation.y = direction1.x;
+            translation.z = -direction1.y;
         }
         else{
             rotation.x = axis.at<double>(0);
@@ -235,21 +232,25 @@ int main(int argc, char** argv) {
         // std::cout << " direction_x: " << direction.x << " direction_y: " << direction.y<< std::endl;
         // std::cout << " cmd_vx_x: " << cmd_vx.x << " cmd_vx_y: " << cmd_vx.y << " cmd_vx_z: " << cmd_vx.z << std::endl;
         // std::cout << "Displacement: " << translation.x << translation.y << translation.z << std::endl;
+        std::cout << "Displacement: " << displacement.x << ", " << displacement.y << ", " << displacement.z << std::endl;
         std::cout << " Error: " << error_ang << " Error dist: " << error_dist << " YawErr: " << yawErr << " PitchErr: " << pitchErr << " RollErr: " << rollErr << std::endl;
         std::stringstream ss;
         // YawRate_cam, PitchRate_cam, YawRate_drone, drone_x, drone_y, drone_z \n 
         // ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "\n";
         // std::string data_0 = ss.str();  
-          
+        error_ang = cv::norm(diff);
+        error_dist = cv::norm(displacement);
         double send_ts = 0;
-        if (error_dist > dist_threshold){
-            ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "\n";
-            data_to_send = ss.str();
-        }
-        else if (error_ang > threshold_error){
-            ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "\n";
-            data_to_send = ss.str();
-        }
+        // if (error_dist > dist_threshold){
+        //     ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "," << "0" << "\n";
+        //     data_to_send = ss.str();
+        // }
+        // else if (error_ang > threshold_error){
+        //     ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
+        //     data_to_send = ss.str();
+        // }
+        ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << angle_rate_cmd.z << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
+        data_to_send = ss.str();
         if (data_to_send != "" ){
             if (!client.SendMetadata(data_to_send)) 
             {

@@ -3,6 +3,105 @@
 #include <opencv2/features2d.hpp>
 #include <iostream>
 
+
+// pts1, pts2 are matched pixel points (same length), already filtered by inliers if possible
+// K is 3x3 double, R is 3x3 double from recoverPose (rotation from cam1 -> cam2)
+
+static inline cv::Point2f projectPoint(const cv::Mat& K, const cv::Vec3d& x)
+{
+    double X = x[0], Y = x[1], Z = x[2];
+    double u = (K.at<double>(0,0) * (X/Z)) + K.at<double>(0,2);
+    double v = (K.at<double>(1,1) * (Y/Z)) + K.at<double>(1,2);
+    return cv::Point2f((float)u, (float)v);
+}
+
+cv::Point2f rotationCompensatedResidual(
+    const std::vector<cv::Point2f>& pts1,
+    const std::vector<cv::Point2f>& pts2,
+    const cv::Mat& K,
+    const cv::Mat& R,
+    const cv::Mat& inlierMask // optional: CV_8U mask (Nx1) from findEssentialMat/recoverPose
+)
+{
+    cv::Mat Kinv = K.inv();
+
+    std::vector<float> rx, ry;
+    rx.reserve(pts1.size());
+    ry.reserve(pts1.size());
+
+    for (size_t i = 0; i < pts1.size(); ++i)
+    {
+        if (!inlierMask.empty() && inlierMask.at<uchar>((int)i) == 0)
+            continue;
+
+        // p1 -> normalized ray
+        cv::Vec3d p1(pts1[i].x, pts1[i].y, 1.0);
+        cv::Vec3d x = cv::Vec3d(
+            Kinv.at<double>(0,0)*p1[0] + Kinv.at<double>(0,1)*p1[1] + Kinv.at<double>(0,2)*p1[2],
+            Kinv.at<double>(1,0)*p1[0] + Kinv.at<double>(1,1)*p1[1] + Kinv.at<double>(1,2)*p1[2],
+            Kinv.at<double>(2,0)*p1[0] + Kinv.at<double>(2,1)*p1[1] + Kinv.at<double>(2,2)*p1[2]
+        );
+
+        // rotate ray
+        cv::Vec3d xr(
+            R.at<double>(0,0)*x[0] + R.at<double>(0,1)*x[1] + R.at<double>(0,2)*x[2],
+            R.at<double>(1,0)*x[0] + R.at<double>(1,1)*x[1] + R.at<double>(1,2)*x[2],
+            R.at<double>(2,0)*x[0] + R.at<double>(2,1)*x[1] + R.at<double>(2,2)*x[2]
+        );
+
+        // project back to pixels (rotation-only prediction)
+        cv::Point2f p_rot = projectPoint(K, xr);
+
+        // residual (what rotation can't explain)
+        cv::Point2f r = pts2[i] - p_rot;
+
+        rx.push_back(r.x);
+        ry.push_back(r.y);
+    }
+
+    if (rx.size() < 8) return cv::Point2f(0,0);
+
+    auto median = [](std::vector<float>& v)->float {
+        size_t n = v.size()/2;
+        std::nth_element(v.begin(), v.begin()+n, v.end());
+        return v[n];
+    };
+
+    float dx = median(rx);
+    float dy = median(ry);
+    return cv::Point2f(dx, dy);
+}
+
+
+float rotationCompensatedZoom(
+    const std::vector<cv::Point2f>& pts1,
+    const std::vector<cv::Point2f>& pts2,
+    const cv::Mat& K,
+    const cv::Mat& R,
+    const cv::Mat& inlierMask
+){
+    cv::Mat Kinv = K.inv();
+    cv::Point2f c((float)K.at<double>(0,2), (float)K.at<double>(1,2));
+
+    std::vector<float> ratios;
+    for (size_t i=0;i<pts1.size();++i){
+        if (!inlierMask.empty() && inlierMask.at<uchar>((int)i)==0) continue;
+
+        // predict p_rot from pts1 exactly like above...
+        // (call the same code and get p_rot)
+
+        // r1 = distance to center in image1, r2 = distance to center in image2 after rotation compensation
+        float r1 = cv::norm(pts1[i] - c);
+        float r2 = cv::norm(pts2[i] - /*p_rot*/ c); // <-- better: compare to predicted rotation position
+        if (r1 > 1e-3f) ratios.push_back(r2 / r1);
+    }
+    if (ratios.size() < 8) return 0.f;
+    std::nth_element(ratios.begin(), ratios.begin()+ratios.size()/2, ratios.end());
+    float s = ratios[ratios.size()/2];
+    return std::log(std::max(s, 1e-6f));
+}
+
+
 ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
     // Load target image
     cv::Mat target = cv::imread(targetImagePath, cv::IMREAD_COLOR);
@@ -157,42 +256,51 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
     return crossCheckedMatches;
 }
 
-void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT){
+void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT, cv::Point3f& dxyz ){
     
+    cv::Mat inliersE;
     cv::Mat EssentialMat = cv::findEssentialMat(
                                 inputMatches,     // std::vector<cv::Point2f> from current frame
                                 targetMatches,    // std::vector<cv::Point2f> from target image
                                 cameraMatrix,    // 3x3 intrinsic matrix
                                 cv::RANSAC,      // method
                                 0.999,           // confidence
-                                0.1              // reprojection threshold in pixels
+                                0.1,              // reprojection threshold in pixels
+                                inliersE
                             );
+    int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, bestR, bestT, inliersE);
+    // Now compute translation-like residual in pixels:
+    cv::Point2f dxy = rotationCompensatedResidual(inputMatches, targetMatches, cameraMatrix, bestR, inliersE);
+    float dz = rotationCompensatedZoom(inputMatches, targetMatches, cameraMatrix, bestR, inliersE);
+    dxyz.x = dxy.x;
+    dxyz.y = dxy.y;
+    dxyz.z = dz;
     // std::cout << "Computed Essential Matrix" << std::endl;
-    cv::Mat R1, R2, t;
-    cv::decomposeEssentialMat(EssentialMat, R1, R2, t);
-    // std::cout << "decomposed Essential Matrix" << std::endl;
-    // Build candidate pairs
-    std::vector<std::pair<cv::Mat, cv::Mat>> candidates = {
-        {R1,  t},
-        {R1, -t},
-        {R2,  t},
-        {R2, -t}
-    };
+    // cv::Mat R1, R2, t;
+    // cv::decomposeEssentialMat(EssentialMat, R1, R2, t);
+    // // std::cout << "decomposed Essential Matrix" << std::endl;
+    // // Build candidate pairs
+    // std::vector<std::pair<cv::Mat, cv::Mat>> candidates = {
+    //     {R1,  t},
+    //     {R1, -t},
+    //     {R2,  t},
+    //     {R2, -t}
+    // };
 
-    int bestCount = -1;
-    // cv::Mat bestR;
-    for (const auto& [R, tCandidate] : candidates) {
-        int posZ = sumZCalRelativeScale(R, tCandidate);
-        if (posZ > bestCount) {
-            bestCount = posZ;
-            bestR = R.clone();
-            bestT = tCandidate.clone();
-        }
-    }
+    // int bestCount = -1;
+    // // cv::Mat bestR;
+    // for (const auto& [R, tCandidate] : candidates) {
+    //     int posZ = sumZCalRelativeScale(R, tCandidate);
+    //     if (posZ > bestCount) {
+    //         bestCount = posZ;
+    //         bestR = R.clone();
+    //         bestT = tCandidate.clone();
+    //     }
+    // }
 }
 
 
-std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(const cv::Mat& inputImage){
+std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(cv::Point3f& dxyz, const cv::Mat& inputImage){
     if (!inputImage.empty()){
         cv::Mat inputGray;
         cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
@@ -218,7 +326,8 @@ std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(const cv::Ma
     }
     cv::Mat translation, rotationMatrix;
     // std::cout << "Find translation " << std::endl;
-    findAnddecomposeEssentialMat(rotationMatrix, translation);
+    
+    findAnddecomposeEssentialMat(rotationMatrix, translation, dxyz);
     //
     // findAnddecomposeEssentialMat(rotationMatrix, translation);
     // std::cout << "Translation Vector " << std::endl;
@@ -226,7 +335,7 @@ std::pair<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection(const cv::Ma
     // double translation_norm = translation.at<double>(2,0);
     cv::Mat direction = (translation_norm > 1e-12) ? translation/translation_norm : cv::Mat::zeros(3,1, CV_64F);
     // std::cout << "Rotation Matrix: "<< rotationMatrix << std::endl;
-    cv::Mat world_transformation = rotationMatrix * direction;
+    // cv::Mat world_transformation = rotationMatrix * direction;
     // std::cout << "World rotation matrix" << rotationMatrix << std::endl;
     // std::cout << "World Direction Vector " << direction << std::endl;
     // std::cout << "World Transformation Matrix " << world_transformation << std::endl;
@@ -419,3 +528,6 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     // Return center shift, and zoom proxy
     return cv::Point3f((float)dxc, (float)dyc, (float)z);
 }
+
+
+

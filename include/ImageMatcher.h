@@ -10,7 +10,7 @@ public:
     // Returns a direction vector (dx, dy) to align input image with target
     float getAlignmentDisplacement(const cv::Mat& inputImage);
     cv::Point3f getAlignmentDisplacementRansac(const cv::Mat& inputImage);
-    std::pair<cv::Mat, cv::Point3f> getAlignmentDirection(const cv::Mat& inputImage = cv::Mat());
+    std::pair<cv::Mat, cv::Point3f> getAlignmentDirection( cv::Point3f& dxyz, const cv::Mat& inputImage = cv::Mat());
 
 
 private:
@@ -30,7 +30,7 @@ private:
                                     int gridX = 8,
                                     int gridY = 8,
                                     int maxPerCell = 50);
-    void findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT);
+    void findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT, cv::Point3f& dxyz);
     cv::Mat formTransf(const cv::Mat& R, const cv::Mat& t);
     int sumZCalRelativeScale(const cv::Mat& R, const cv::Mat& t);
 };
