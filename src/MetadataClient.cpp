@@ -103,11 +103,15 @@ void MetadataTcpClient::CloseConnectionhandler( int socket_to_close)
     if (socket_to_close != INVALID_SOCKET) {
         close(socket_to_close); // POSIX function to close a file descriptor
         socket_to_close = INVALID_SOCKET;
-    } else if (socket_to_close == -2) {
-        close(client_socket); // POSIX function to close a file descriptor
-        close(server_socket); // POSIX function to close a file descriptor
-        client_socket = INVALID_SOCKET;
-        server_socket = INVALID_SOCKET;
+    } else if (socket_to_close == -2 ) {
+        if (server_socket != INVALID_SOCKET) {
+            close(server_socket); // POSIX function to close a file descriptor
+            server_socket = INVALID_SOCKET;
+        }
+        if (client_socket != INVALID_SOCKET) {
+            close(client_socket); // POSIX function to close a file descriptor
+            client_socket = INVALID_SOCKET;
+        }
     }
     
 }
