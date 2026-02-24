@@ -12,8 +12,8 @@
 #include <string>
 #include <numeric>
 
-int imgWidth = 640;
-int imgHeight = 480;
+int imgWidth = 1920;
+int imgHeight = 1080;
 bool unrealMode = true;
 double error_ang = 1.0;
 double threshold_error = 10e-2;;

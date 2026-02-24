@@ -1,4 +1,6 @@
 build/
 .venv/
 .vscode/
-groundtruths/
+groundTruths/
+results/
+logs/
