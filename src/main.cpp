@@ -54,11 +54,14 @@ int main(int argc, char** argv) {
 
     if (client.StartConnectionHandler(cmd_ip, cmd_port, "command_handler")) client.startReceiver();
     else {
-        std::cerr << "Failed to start metadata server connection handler. Ensure no other instance is running and port 9020 is available." << std::endl;
+        std::cerr << "Failed to start command handler. Ensure no other instance is running and port " << cmd_port << " is available." << std::endl;
         return -1;
     }
     
-    client.StartConnectionHandler(msg_ip, msg_port, "metadata_server");
+    if(!client.StartConnectionHandler(msg_ip, msg_port, "metadata_server")) {
+        std::cerr << "Failed to start metadata server connection handler. Ensure no other instance is running and port " << msg_port << " is available." << std::endl;
+        return -1;
+    }
     // 1. Connect (Uses default 127.0.0.1:9001)
     // while (!client.Connect(msg_ip, msg_port)) {
     //     std::cout << "Waiting for metadata server to be available on port " << msg_port << std::endl;

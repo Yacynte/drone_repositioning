@@ -154,16 +154,16 @@ bool MetadataTcpClient::StartConnectionHandler(const std::string& ip, int port, 
         std::cout << "server_socket fd = " << server_socket << std::endl;
         if (server_socket < 0) {
             perror("accept failed");
+            return false;
         }
-        return false;
     } else if (client == "metadata_server") {
         // std::cout << "Waiting for client to connect..." << std::endl;
         client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
         std::cout << "client_socket fd = " << client_socket << std::endl;
         if (client_socket < 0) {
             perror("accept failed");
+            return false;
         }
-        return false;
     }
     
     
