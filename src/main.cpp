@@ -33,14 +33,14 @@ int main(int argc, char** argv) {
     std::string stream_url      = getStr(flags, "--rtsp", "rtsp://10.116.88.38:8554/mystream");
     int camera_index      = getInt(flags, "--camera", 0);
 
-    std::string cmd_ip    = getStr(flags, "--cmd_ip", "127.0.0.1");
+    std::string cmd_ip    = getStr(flags, "--cmd_ip", "0.0.0.0");
     int cmd_port          = getInt(flags, "--cmd_port", 9020);
 
-    std::string msg_ip    = getStr(flags, "--relay_ip", "127.0.0.1");
+    std::string msg_ip    = getStr(flags, "--relay_ip", "0.0.0.0");
     int msg_port          = getInt(flags, "--relay_port", 9010);
 
-    std::string log_path    = getStr(flags, "--log", "logs/");
-    std::string target_image_path = getStr(flags, "--target", "target.png");
+    std::string log_path    = getStr(flags, "--log", "../logs/");
+    std::string target_image_path = getStr(flags, "--target", "../target.png");
 
     std::cout << "[mode] " << mode << "\n";
     std::cout << "[net] cmd=" << cmd_ip << ":" << cmd_port
@@ -52,17 +52,18 @@ int main(int argc, char** argv) {
     // Choose input mode: "live" (default) or "stream <url>"
     MetadataTcpClient client;
 
-    if (client.StartConnectionHandler(cmd_ip, cmd_port)) client.startReceiver();
+    if (client.StartConnectionHandler(cmd_ip, cmd_port, "command_handler")) client.startReceiver();
     else {
         std::cerr << "Failed to start metadata server connection handler. Ensure no other instance is running and port 9020 is available." << std::endl;
         return -1;
     }
     
+    client.StartConnectionHandler(msg_ip, msg_port, "metadata_server");
     // 1. Connect (Uses default 127.0.0.1:9001)
-    while (!client.Connect(msg_ip, msg_port)) {
-        std::cout << "Waiting for metadata server to be available on port " << msg_port << std::endl;
-        usleep(1000 * 1000); // Sleep for 1 second before retrying
-    }
+    // while (!client.Connect(msg_ip, msg_port)) {
+    //     std::cout << "Waiting for metadata server to be available on port " << msg_port << std::endl;
+    //     usleep(1000 * 1000); // Sleep for 1 second before retrying
+    // }
     std::cout << "Connected to metadata server" << std::endl;
     // std::string mode = "live";
     // std::string stream_url;

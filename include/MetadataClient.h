@@ -38,7 +38,7 @@ private:
 public:
     void startReceiver();
     void stopReceiver();
-    void CloseConnectionhandler();
+    void CloseConnectionhandler(int socket_to_close = -2); // -2 means close both, 0 for server_socket, 1 for client_socket
 
     // int server_socket = -1; // connected client socket
 
@@ -68,7 +68,7 @@ public:
     // bool Connect(const std::string& ip = "192.168.0.200", int port = 9010);
     // bool StartConnectionHandler(const std::string& ip = "192.168.0.200", int port = 9020);
     bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
-    bool StartConnectionHandler(const std::string& ip = "127.0.0.1", int port = 9020);
+    bool StartConnectionHandler(const std::string& ip = "127.0.0.1", int port = 9020, const std::string client = "command_handler");
     void receiveCommand();
     // bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
     std::atomic<bool> runRx{false};

@@ -98,18 +98,24 @@ bool MetadataTcpClient::IsConnected() const
 }
 
 
-void MetadataTcpClient::CloseConnectionhandler()
+void MetadataTcpClient::CloseConnectionhandler( int socket_to_close)
 {
-    if (server_socket != INVALID_SOCKET) {
+    if (socket_to_close != INVALID_SOCKET) {
+        close(socket_to_close); // POSIX function to close a file descriptor
+        socket_to_close = INVALID_SOCKET;
+    } else if (socket_to_close == -2) {
+        close(client_socket); // POSIX function to close a file descriptor
         close(server_socket); // POSIX function to close a file descriptor
+        client_socket = INVALID_SOCKET;
         server_socket = INVALID_SOCKET;
     }
     
 }
 
-bool MetadataTcpClient::StartConnectionHandler(const std::string& ip, int port)
+bool MetadataTcpClient::StartConnectionHandler(const std::string& ip, int port, const std::string client)
 {
-    CloseConnectionhandler(); // Close any existing server socket
+    int socet_to_close = (client == "command_handler") ? server_socket : client_socket;
+    CloseConnectionhandler(socet_to_close); // Close any existing server socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket failed");
@@ -135,16 +141,30 @@ bool MetadataTcpClient::StartConnectionHandler(const std::string& ip, int port)
 
     listen(server_fd, 1);
 
-    std::cout << "Waiting on " << ip << ":" << port << std::endl;
+    std::cout << "Waiting on " << client << " at: " << ip << ":" << port << std::endl;
 
     socklen_t addrlen = sizeof(address);
-    server_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
-    std::cout << "server_socket fd = " << server_socket << std::endl;
-    close(server_fd); // No longer need the listening socket
-    if (server_socket < 0) {
-        perror("accept failed");
+    if (client == "command_handler") {
+        // std::cout << "Waiting for server to connect..." << std::endl;
+        server_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+        std::cout << "server_socket fd = " << server_socket << std::endl;
+        if (server_socket < 0) {
+            perror("accept failed");
+        }
+        return false;
+    } else if (client == "metadata_server") {
+        // std::cout << "Waiting for client to connect..." << std::endl;
+        client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+        std::cout << "client_socket fd = " << client_socket << std::endl;
+        if (client_socket < 0) {
+            perror("accept failed");
+        }
         return false;
     }
+    
+    
+    close(server_fd); // No longer need the listening socket
+    
     return true;
 }
 
