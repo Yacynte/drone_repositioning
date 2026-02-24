@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
         // // std::cout<< "Direction: " << direction << std::endl;
 
     }
-    client.CloseConnectionhandler()
+    client.CloseConnectionhandler();
     client.stopReceiver();
     cap.release();
     // cv::destroyAllWindows();
