@@ -20,7 +20,10 @@ def load_motion_log(filepath):
         'PosZ': 'pos_z',
         'Pitch': 'pitch',
         'Yaw': 'yaw',
-        'Roll': 'roll'
+        'Roll': 'roll',
+        'PitchCam': 'rel_pitch',
+        'YawCam': 'rel_yaw',
+        'RollCam': 'rel_roll'
     }, inplace=True)
     return df
 
@@ -46,7 +49,7 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     Uses motion_log_2's time axis for both datasets (motion_log_1 values are constant, so time doesn't matter).
     Extends constant ground truth values across the entire time duration.
     """
-    fig, axes = plt.subplots(6, 1, figsize=(14, 12))
+    fig, axes = plt.subplots(9, 1, figsize=(21, 16))
     fig.suptitle('Ground Truth (MotionLog 1) vs Unreal Engine Path (MotionLog 2)', fontsize=16, fontweight='bold')
     
     # Normalize time: start from 0 (reference from motion_log_2's first time)
@@ -60,6 +63,9 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     const_pitch = motion_log_1['pitch'].iloc[0]
     const_yaw = motion_log_1['yaw'].iloc[0]
     const_roll = motion_log_1['roll'].iloc[0]
+    const_rel_pitch = motion_log_1['rel_pitch'].iloc[0]
+    const_rel_yaw = motion_log_1['rel_yaw'].iloc[0]
+    const_rel_roll = motion_log_1['rel_roll'].iloc[0]
     
     # Create constant arrays with same length as motion_log_2
     n_points = len(motion_log_2)
@@ -69,6 +75,9 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     gt_pitch = np.full(n_points, const_pitch)
     gt_yaw = np.full(n_points, const_yaw)
     gt_roll = np.full(n_points, const_roll)
+    gt_rel_pitch = np.full(n_points, const_rel_pitch)
+    gt_rel_yaw = np.full(n_points, const_rel_yaw)
+    gt_rel_roll = np.full(n_points, const_rel_roll)
     
     # Plot Position X
     axes[0].plot(motion_log_2_time_normalized, gt_pos_x, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
@@ -109,9 +118,30 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     axes[5].plot(motion_log_2_time_normalized, gt_roll, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
     axes[5].plot(motion_log_2_time_normalized, motion_log_2['roll'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
     axes[5].set_ylabel('Roll (degrees)', fontsize=10)
-    axes[5].set_xlabel('Time (seconds)', fontsize=10)
     axes[5].legend(loc='best')
     axes[5].grid(True, alpha=0.3)
+    
+    # Plot Relative Rotation X (Relative Pitch)
+    axes[6].plot(motion_log_2_time_normalized, gt_rel_pitch, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[6].plot(motion_log_2_time_normalized, motion_log_2['rel_pitch'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[6].set_ylabel('Rel. Pitch (degrees)', fontsize=10)
+    axes[6].legend(loc='best')
+    axes[6].grid(True, alpha=0.3)
+    
+    # Plot Relative Rotation Y (Relative Yaw)
+    axes[7].plot(motion_log_2_time_normalized, gt_rel_yaw, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[7].plot(motion_log_2_time_normalized, motion_log_2['rel_yaw'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[7].set_ylabel('Rel. Yaw (degrees)', fontsize=10)
+    axes[7].legend(loc='best')
+    axes[7].grid(True, alpha=0.3)
+    
+    # Plot Relative Rotation Z (Relative Roll)
+    axes[8].plot(motion_log_2_time_normalized, gt_rel_roll, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[8].plot(motion_log_2_time_normalized, motion_log_2['rel_roll'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[8].set_ylabel('Rel. Roll (degrees)', fontsize=10)
+    axes[8].set_xlabel('Time (seconds)', fontsize=10)
+    axes[8].legend(loc='best')
+    axes[8].grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -173,11 +203,11 @@ def main():
         return
     
     # Look for GT (ground truth) file
-    gt_logs = list(repo_root.glob('groundTruths/*GT*.csv'))
+    gt_logs = sorted(list(repo_root.glob('groundTruths/*GT*.csv')))
     if gt_logs:
         motion_log_1_path = gt_logs[-1]  # Use the GT file
         # Get other motion logs for comparison
-        other_logs = [f for f in motion_logs if 'GT' not in f.name]
+        other_logs = sorted([f for f in motion_logs if 'GT' not in f.name])
         motion_log_2_path = other_logs[-1] if other_logs else None
         print(f"Loading ground truth (poses): {motion_log_1_path.name}")
         if motion_log_2_path:

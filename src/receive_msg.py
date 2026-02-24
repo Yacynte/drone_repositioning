@@ -3,6 +3,22 @@ import threading
 from queue import Queue
 import time
 
+import argparse
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--listen_ip", default="127.0.0.1")
+    ap.add_argument("--listen_port", type=int, default=9010)
+    ap.add_argument("--ue_ip", default="10.116.88.38")
+    ap.add_argument("--ue_port", type=int, default=9001)
+    return ap.parse_args()
+
+args = parse_args()
+LISTEN_IP = args.listen_ip
+LISTEN_PORT = args.listen_port
+SERVER_IP = args.ue_ip
+SERVER_PORT = args.ue_port
+
 
 class ReceiveMsg:
     def __init__(self):
@@ -184,10 +200,10 @@ class ReceiveMsg:
     
 class MsgHandler:
     def __init__(self):
-        self.server_ip = '10.116.88.38'
-        self.client_ip = "127.0.0.1"
-        self.server_port = 9001
-        self.client_port = 9010
+        self.server_ip = SERVER_IP           #'10.116.88.38'
+        self.client_ip = LISTEN_IP           #"127.0.0.1"
+        self.server_port = SERVER_PORT          #9001
+        self.client_port = LISTEN_PORT          #9010
         self.threads = []  # Track all threads
         # Start a server
         self.msg_handler = ReceiveMsg()

@@ -10,6 +10,12 @@
 #include <arpa/inet.h>  // For inet_pton()
 #include <unistd.h>     // For close()
 #include <cerrno>       // For errno
+#include <unistd.h>     // close()
+#include <sys/socket.h> // recv()
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <string>
 
 // Define invalid socket and error check based on POSIX conventions
 #define INVALID_SOCKET -1
@@ -23,12 +29,29 @@ class MetadataTcpClient
 private:
     // POSIX socket file descriptor
     int client_socket = INVALID_SOCKET;
+    int server_socket = INVALID_SOCKET;
     // Constants
     // int DEFAULT_PORT = 9001; // Default port for metadata server
     // std::string DEFAULT_IP = "127.0.0.1";
     bool IsConnected() const;  
 
 public:
+    void startReceiver();
+    void stopReceiver();
+    void CloseConnectionhandler();
+
+    // int server_socket = -1; // connected client socket
+
+    // flags (atomic = safe to write/read from different threads)
+    std::atomic<bool> startRepositioning{false};
+    std::atomic<bool> stopRepositioning{false};
+    std::atomic<bool> pauseRepositioning{false};
+    std::atomic<bool> resumeRepositioning{false};
+    std::atomic<bool> rotationOnly{false};
+    std::atomic<bool> translationOnly{false};
+    std::atomic<bool> stopRotation{false};
+    std::atomic<bool> stopTranslation{false};
+
     /**
      * @brief Constructor. No special initialization required for POSIX.
      */
@@ -42,8 +65,17 @@ public:
     {
         CloseSocket();
     }
-    // bool Connect(const std::string& ip = "10.116.88.38", int port = 9001);
+    // bool Connect(const std::string& ip = "192.168.0.200", int port = 9010);
+    // bool StartConnectionHandler(const std::string& ip = "192.168.0.200", int port = 9020);
     bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
+    bool StartConnectionHandler(const std::string& ip = "127.0.0.1", int port = 9020);
+    void receiveCommand();
+    // bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
+    std::atomic<bool> runRx{false};
+    std::thread rxThread;
+
+    // for assembling lines across recv() calls
+    std::string rxAccum;
     bool SendMetadata(const std::string& data_to_send);
     /**
      * @brief Attempts to connect to the metadata server.

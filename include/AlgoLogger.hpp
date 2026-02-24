@@ -50,6 +50,11 @@ public:
         const auto t = Clock::now().time_since_epoch();
         return std::chrono::duration<double>(t).count();
     }
+    static double nowWallSec() {
+        auto t = std::chrono::system_clock::now().time_since_epoch();
+        return std::chrono::duration<double>(t).count();
+    }
+
 
     // Parse a command string like: "0,0,0,0,0,1.23\n"
     static std::optional<Command6> parseCommand6(const std::string& cmd) {

@@ -1,5 +1,8 @@
 #include "MetadataClient.h"
 #include <iostream>
+#include <iostream>
+#include <cstring>
+
 
 
 bool MetadataTcpClient::Connect(const std::string& ip, int port)
@@ -83,6 +86,7 @@ void MetadataTcpClient::CloseSocket()
             close(client_socket); // POSIX function to close a file descriptor
             client_socket = INVALID_SOCKET;
         }
+        
     }
 
 /**
@@ -91,6 +95,151 @@ void MetadataTcpClient::CloseSocket()
 bool MetadataTcpClient::IsConnected() const
 {
     return client_socket != INVALID_SOCKET;
+}
+
+
+void MetadataTcpClient::CloseConnectionhandler()
+{
+    if (server_socket != INVALID_SOCKET) {
+        close(server_socket); // POSIX function to close a file descriptor
+        server_socket = INVALID_SOCKET;
+    }
+    
+}
+
+bool MetadataTcpClient::StartConnectionHandler(const std::string& ip, int port)
+{
+    CloseConnectionhandler(); // Close any existing server socket
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket failed");
+        return false;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+
+    // Convert string IP to binary
+    if (inet_pton(AF_INET, ip.c_str(), &address.sin_addr) <= 0) {
+        perror("Invalid IP address");
+        close(server_fd);
+        return -1;
+    }
+
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        perror("bind failed");
+        close(server_fd);
+        return -1;
+    }
+
+    listen(server_fd, 1);
+
+    std::cout << "Waiting on " << ip << ":" << port << std::endl;
+
+    socklen_t addrlen = sizeof(address);
+    server_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+    std::cout << "server_socket fd = " << server_socket << std::endl;
+    close(server_fd); // No longer need the listening socket
+    if (server_socket < 0) {
+        perror("accept failed");
+        return false;
+    }
+    return true;
+}
+
+static inline void trim_inplace(std::string& s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
+        s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i) s.erase(0, i);
+}
+
+void MetadataTcpClient::receiveCommand() {
+    char buf[1024];
+
+    while (runRx) {
+        ssize_t n = recv(server_socket, buf, sizeof(buf), 0);
+
+        if (n == 0) {
+            std::cerr << "Client disconnected.\n";
+            break;
+        }
+        if (n < 0) {
+            if (!runRx) break; // likely shutdown() triggered
+            perror("recv failed");
+            break;
+        }
+
+        rxAccum.append(buf, buf + n);
+
+        // Process complete lines
+        size_t pos;
+        while ((pos = rxAccum.find('\n')) != std::string::npos) {
+            std::string cmd = rxAccum.substr(0, pos);
+            rxAccum.erase(0, pos + 1);
+
+            // std::cout << "RAW cmd bytes: ";
+            // for (unsigned char c : cmd) std::cout << int(c) << ' ';
+            // std::cout << "\nCMD='" << cmd << "'\n";
+
+
+            trim_inplace(cmd);
+            if (cmd.empty()) continue;
+
+            // --- FIXED comparisons ---
+            if (cmd == "start_repositioning" || cmd == "start") {
+                startRepositioning.store(true);
+                stopRepositioning.store(false); // reset stop flag
+                // std::cout << "Received command to start repositioning" << std::endl;
+            } else if (cmd == "stop_repositioning" || cmd == "stop") {
+                stopRepositioning.store(true);
+                startRepositioning.store(false); // reset start flag
+                // std::cout << "Received command to stop repositioning" << std::endl;
+            } else if (cmd == "pause_repositioning" || cmd == "pause") {
+                pauseRepositioning.store(true);
+                resumeRepositioning.store(false); // reset resume flag
+            } else if (cmd == "resume_repositioning" || cmd == "resume") {
+                resumeRepositioning.store(true);
+                pauseRepositioning.store(false); // reset pause flag
+            } else if (cmd == "rotation_only") {
+                rotationOnly.store(true);
+                translationOnly.store(false); // reset translation-only flag
+                // stopTranslation.store(true); // stop translation if switching to rotation-only
+            } else if (cmd == "translation_only") {
+                translationOnly.store(true);
+                rotationOnly.store(false); // reset rotation-only flag
+                // stopRotation.store(true); // stop rotation if switching to translation-only
+            } else {
+                std::cerr << "Unknown command: '" << cmd << "'\n";
+            }
+        }
+    }
+
+    runRx = false;
+}
+
+
+void MetadataTcpClient::startReceiver() {
+    if (server_socket < 0) {
+        std::cerr << "No client connected.\n";
+        return;
+    }
+    runRx = true;
+    rxThread = std::thread(&MetadataTcpClient::receiveCommand, this);
+}
+
+void MetadataTcpClient::stopReceiver() {
+    runRx = false;
+
+    // If recv() is blocking, shutting down the socket will unblock it.
+    if (server_socket >= 0) {
+        shutdown(server_socket, SHUT_RDWR);
+    }
+    CloseConnectionhandler(); // Ensure server socket is closed
+
+    if (rxThread.joinable()) rxThread.join();
 }
 
 // --- Example Usage ---
