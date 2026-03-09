@@ -28,9 +28,9 @@ private:
     void detectAndComputegrid(const cv::Mat& image,
                                     std::vector<cv::KeyPoint>& keypoints,
                                     cv::Mat& descriptors,
-                                    int gridX = 10,
-                                    int gridY = 8,
-                                    int maxPerCell = 100);
+                                    int gridX = 5,
+                                    int gridY = 4,
+                                    int maxPerCell = 50);
     void findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT);
     cv::Mat formTransf(const cv::Mat& R, const cv::Mat& t);
     int sumZCalRelativeScale(const cv::Mat& R, const cv::Mat& t);

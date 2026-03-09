@@ -28,6 +28,7 @@ def parse_args():
     # Where receive_msg forwards to (e.g., Unreal Engine server)
     ap.add_argument("--ue_ip", default="10.116.88.38")
     ap.add_argument("--ue_port", type=int, default=9001)
+    ap.add_argument("--unreal", type=int, default = 1)
 
     # Paths
     ap.add_argument("--cpp_bin", default="./build/ImageMatcher")
@@ -144,6 +145,7 @@ def main():
             "--relay_port", str(args.relay_listen_port),
             "--log", args.log,
             "--target", args.target,
+            "--unreal", str(args.unreal),
         ]
         if args.mode == "stream":
             cpp_cmd += ["--rtsp", args.rtsp]

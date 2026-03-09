@@ -29,30 +29,38 @@ class ReceiveMsg:
         self.client_connected = False
         self.lock = threading.Lock()
 
-    def start_server(self, port=5000, host='0.0.0.0'):
+    def connect_server_cpp(self, port=5000, host='0.0.0.0'):
         """Start a server on the specified port to receive messages from clients."""
         try:
+            # self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # self.server_socket.bind((host, port))
+            # self.server_socket.listen(1)
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((host, port))
-            self.server_socket.listen(1)
+            self.server_socket.connect((host, port))
             self.server_running = True
             print(f"Server started on {host}:{port}")
-            
+
             # Start accepting connections in a separate thread
-            threading.Thread(target=self._accept_connections, daemon=True).start()
+            # threading.Thread(target=self._accept_connections, daemon=True).start()
+            threading.Thread(
+                    target=self._receive_from_client,
+                    args=(self.server_socket, SERVER_IP),
+                    daemon=True
+                ).start()
         except Exception as e:
             print(f"Error starting server: {e}")
+            self.server_running = False
 
     def _accept_connections(self):
         """Accept incoming client connections and receive messages."""
         while self.server_running:
             try:
-                client_conn, client_addr = self.server_socket.accept()
-                print(f"Client connected from {client_addr}")
+                # client_conn, client_addr = self.server_socket.accept()
+                print(f"Client connected from {SERVER_IP}")
                 threading.Thread(
                     target=self._receive_from_client,
-                    args=(client_conn, client_addr),
+                    args=(self.server_socket, SERVER_IP),
                     daemon=True
                 ).start()
             except Exception as e:
@@ -214,11 +222,12 @@ class MsgHandler:
     def __start_handler(self):
         
 
-        # Connect as client to another server
+        # Connect as client to unreal engine
         self.msg_handler.connect_to_server(self.server_ip, self.server_port)
 
-        # Start server
-        self.msg_handler.start_server(port=self.client_port, host=self.client_ip)
+        # Connect as client to cpp
+        self.msg_handler.connect_server_cpp(port=self.client_port, host=self.client_ip)
+        # self.msg_handler.connect_to_server(self.client_ip, self.server_port)
         while True:
             message = self.msg_handler.get_from_queue()  # Get and remove
             if message:

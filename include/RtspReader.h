@@ -8,10 +8,10 @@
 
 class RtspReader {
 public:
-    RtspReader(const std::string& url, int width, int height);
+    RtspReader(const std::string& url, int width, int height, bool unreal_test = 0 );
     ~RtspReader();
 
-    void start();
+    void start(cv::VideoCapture* externalCap = nullptr);
     void stop();
     bool getFrame(cv::Mat& out);
 
@@ -21,6 +21,8 @@ private:
     std::string cmd_;
     int width_, height_;
     int frameSize_;
+    bool unreal_test_;
+    cv::VideoCapture* cap = nullptr;
 
     std::thread thread_;
     std::atomic<bool> running_{false};

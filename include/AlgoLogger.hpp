@@ -1,7 +1,6 @@
 #pragma once
 
 #include <opencv2/core.hpp>
-
 #include <chrono>
 #include <fstream>
 #include <iomanip>
@@ -10,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
 
 class AlgoLogger {
 public:

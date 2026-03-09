@@ -6,6 +6,38 @@
 #include <string>
 // #include "AlgoLogger.hpp"
 
+bool hasNaN(const cv::Point3f& p) {
+    return std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z);
+}
+
+
+cv::Point3f activation(cv::Point3f x, float k = 1.0f, std::string function = "sigmoid") {
+    if (function == "sigmoid") {
+        cv::Point3f sig;
+        // float k = 1.0f;  // increase → steeper (toward tanh), decrease → gentler
+        sig.x = 2.0f / (1.0f + std::exp(-k * x.x)) - 1.0f;
+        sig.y = 2.0f / (1.0f + std::exp(-k * x.y)) - 1.0f;
+        sig.z = 2.0f / (1.0f + std::exp(-k * x.z)) - 1.0f;
+        return sig;
+    }
+    else if (function == "tanh") {
+        return cv::Point3f(
+            std::tanh(x.x),
+            std::tanh(x.y),
+            std::tanh(x.z)
+        );
+    }
+    else if (function == "gaussian") {
+        return cv::Point3f(
+            1.0f - std::exp(-x.x),
+            1.0f - std::exp(-x.y),
+            1.0f - std::exp(-x.z)
+        );
+    }
+    return x; // cv::Point3f(0, 0, 0); // fallback
+}
+
+
 using Clock = std::chrono::steady_clock;
 struct YPRDeg {
     double yaw;   // Z
@@ -17,11 +49,19 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p)
 {
     return cv::Point3f(
         p.z,      // forward
-        p.x,      // right
+        -p.x,      // right
         -p.y      // up
     );
 }
 
+cv::Point3f ConvertCVToUERot(const cv::Point3f& r)
+{
+    return cv::Point3f(
+        -r.z,      // Pitch (Y axis)
+        -r.y,      // Yaw   (Z axis)
+        r.x      // Roll  (X axis)
+    );
+}
 
 static double wrapDeg(double a)
 {
@@ -66,6 +106,7 @@ static cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
     const double rad2deg = 180.0 / CV_PI;
     // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
     return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
+    // return cv::Point3f((float)(yaw), (float)(pitch), (float)(roll));
 }
 
 

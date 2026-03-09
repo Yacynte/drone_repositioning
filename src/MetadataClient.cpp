@@ -73,7 +73,7 @@ bool MetadataTcpClient::SendMetadata(const std::string& data_to_send)
         }
         
         // Success
-        // std::cout << "Sent metadata: "<< data_to_send << std::endl;
+        std::cout << "Sent metadata: "<< data_to_send << std::endl;
         return true;
     }
 

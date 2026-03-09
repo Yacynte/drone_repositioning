@@ -225,7 +225,7 @@ def main():
             print(f"Loading Unreal Engine path (rates): {motion_log_2_path.name}")
     
     # Get AlgoLog (algorithm results)
-    algo_logs = list(repo_root.glob('build/AlgoLog_*.csv'))
+    algo_logs = list(repo_root.glob('logs/AlgoLog_*.csv'))
     if not algo_logs:
         print("❌ No AlgoLog files found in build/")
         return

@@ -484,7 +484,8 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
         zMotion += (dot > 0) ? -1.0f : 1.0f;
     }
 
-    zMotion /= goodMatches.size(); // average tendency
+    // zMotion /= goodMatches.size(); // average tendency
+    if(std::abs(zMotion) < 0.35 * goodMatches.size()) zMotion = 0; 
 
     // Robust affine (rotation + uniform scale + translation), rejects outliers
     cv::Mat inliers;
@@ -523,21 +524,21 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     double z = std::log(std::max(s, 1e-6));
 
     // Return (x,y) in pixels and z as dimensionless zoom error
-    return cv::Point3f((float)tx, (float)ty, (float)z);
-    // // rotation (radians)
-    // double theta = std::atan2(c, a);
+    // return cv::Point3f((float)tx, (float)ty, (float)zMotion);
+    // rotation (radians)
+    double theta = std::atan2(c, a);
 
-    // // center displacement (pixels)
-    // // cv::Point2f center(inputGray.cols * 0.5f, inputGray.rows * 0.5f);
-    // double cx = center.x, cy = center.y;
-    // double cxp = a*cx + b*cy + tx;
-    // double cyp = c*cx + d*cy + ty;
+    // center displacement (pixels)
+    // cv::Point2f center(inputGray.cols * 0.5f, inputGray.rows * 0.5f);
+    double cx = center.x, cy = center.y;
+    double cxp = a*cx + b*cy + tx;
+    double cyp = c*cx + d*cy + ty;
 
-    // double dxc = cxp - cx;
-    // double dyc = cyp - cy;
+    double dxc = cxp - cx;
+    double dyc = cyp - cy;
 
-    // // Return center shift, and zoom proxy
-    // return cv::Point3f((float)dxc, (float)dyc, (float)zMotion);
+    // Return center shift, and zoom proxy
+    return cv::Point3f((float)dxc, (float)dyc, (float)zMotion);
 }
 
 
