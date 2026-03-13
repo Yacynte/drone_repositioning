@@ -16,6 +16,7 @@ add_executable(ImageMatcher
     src/ImageMatcher.cpp
     src/MetadataClient.cpp
     src/RstpReader.cpp
+    src/Utils.cpp
 )
 
 target_link_libraries(ImageMatcher ${OpenCV_LIBS})

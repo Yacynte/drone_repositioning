@@ -1,7 +1,8 @@
 #pragma once
 #include <opencv2/opencv.hpp>
 #include <opencv2/features2d.hpp>
-#include <string>
+// #include <string>
+
 
 class ImageMatcher {
 public:
@@ -11,7 +12,7 @@ public:
     // Returns a direction vector (dx, dy) to align input image with target
     cv::Point3f getAlignmentDisplacement(const cv::Mat& inputImage);
     cv::Point3f getAlignmentDisplacementRansac(const cv::Mat& inputImage);
-    std::pair<cv::Mat, cv::Point3f> getAlignmentDirection( const cv::Mat& inputImage = cv::Mat());
+    std::tuple<cv::Mat, cv::Point3f, cv::Point3f> getAlignmentDirection( const cv::Mat& inputImage = cv::Mat());
 
 
 private:
@@ -21,9 +22,14 @@ private:
     cv::Mat cameraMatrix;
     std::vector<cv::Point2f> inputMatches, targetMatches;
     cv::Ptr<cv::SIFT> sift;
-    cv::Ptr<cv::BFMatcher> matcher;
-
+    // cv::Ptr<cv::BFMatcher> matcher;
+    cv::FlannBasedMatcher matcherFlann;
+    float width, height;
+    cv::Point3f computeRotation();
     std::vector<cv::DMatch> goodMatcher(const cv::Mat& inputDescriptors);
+    std::vector<cv::DMatch> gridFilterMatches(const std::vector<cv::DMatch>& matches,
+                                                        const std::vector<cv::KeyPoint>& queryKps,
+                                                        int gridCols = 5, int gridRows = 4, int maxPerCell = 50);
     void detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors);
     void detectAndComputegrid(const cv::Mat& image,
                                     std::vector<cv::KeyPoint>& keypoints,

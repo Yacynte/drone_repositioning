@@ -5,7 +5,7 @@
 #include "MetadataClient.h"
 #include "RtspReader.h"
 #include "AlgoLogger.hpp"
-#include "Utils.hpp"
+#include "Utils.h"
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -43,6 +43,9 @@ int main(int argc, char** argv) {
 
     std::string log_path    = getStr(flags, "--log", "../logs/");
     std::string target_image_path = getStr(flags, "--target", "../target.png");
+
+    int imgHeight_          = getInt(flags, "--imgHeight", 640);
+    int imgWidth_          = getInt(flags, "--imgWidth", 480);
 
     std::cout << "[mode] " << mode << "\n";
     std::cout << "[net] cmd=" << cmd_ip << ":" << cmd_port
@@ -90,7 +93,7 @@ int main(int argc, char** argv) {
     double old_img_ts = 0;
 
     float v_max = 30.0;           // cm/s or drone units
-    float w_max = 10.0;             // degrees/s
+    float w_max = 1.0;             // degrees/s
     float pitch_rate_max = 2;
     cv::Point3f direction = cv::Point3f(0,0,0);
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
@@ -130,7 +133,9 @@ int main(int argc, char** argv) {
     else {
         std::cerr << "Unknown mode: " << mode << ". Use 'live' or 'stream <url>'." << std::endl;
         return -1;
-    }   
+    }
+    
+    if (!unreal_test) imgHeight = imgHeight_; imgWidth = imgWidth_;
 
     cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
@@ -178,7 +183,7 @@ int main(int argc, char** argv) {
         auto displacement_ = matcher.getAlignmentDisplacementRansac(frame);
         std::cout << " Displacement (pixels): " << displacement_ << std::endl;
         // std::cout << "Processing frame for Rotation..." << std::endl;
-        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection();
+        auto [rotationMatrix, direction1, rotVec]  = matcher.getAlignmentDirection();
         direction1 *= 100;           // convert to cm (tune this scale factor based on actual camera FOV and target size)
         // cv::Point3f direction = cv::Point3f(0,0,0);
         cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
@@ -195,19 +200,7 @@ int main(int argc, char** argv) {
                                          axis.at<float>(2));
         cv::Point3f rotation, translation, displacement;
 
-        // // usage
-        // double yawErr   = wrapDeg(rotation_vec.yaw);
-        // double pitchErr = wrapDeg(rotation_vec.pitch);
-        // double rollErr  = wrapDeg(rotation_vec.roll);
-        
-        // float yaw_rate_max = yaw_rate_max_ * (1.f - std::exp(- k_yaw * angle));
-        // float v_maxX = v_max_ * (1.f - std::exp(- k * cv::norm(displacement)));
-        // std::cout << "Max yaw rate: " << yaw_rate_max << ", Angle: " << angle << std::endl;
-        // double yawRateCmd   = tanhRate(yawErr,   yaw_rate_max, k_yaw);  // deg/s
-        // double pitchRateCmd = tanhRate(pitchErr, yaw_rate_max, k_yaw);
-        // double rollRateCmd  = tanhRate(rollErr,  yaw_rate_max, k_yaw);
-
-        if (unrealMode){
+        if (unreal_test){
             // rotation.x = axis.at<double>(2) * angle;
             // rotation.y = axis.at<double>(0) * angle;
             // rotation.z = -axis.at<double>(1) * angle;
@@ -218,6 +211,7 @@ int main(int argc, char** argv) {
             translation = ConvertCVToUE(direction1);
             displacement = ConvertCVToUE(displacement_);
             rotation = ConvertCVToUERot(rotation_vec);
+            // rotation = ConvertCVToUERot(rotVec);
         }
         else{
             rotation.x = axis.at<double>(0);
@@ -245,7 +239,8 @@ int main(int argc, char** argv) {
 
         cmd_vx = alpha * cmd_vx + (1 - alpha) * last_cmd_vx;
         // std::cout << "Smoothed cmd_vx: " << cmd_vx << std::endl;
-        angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
+        std::cout << " rotation rate without correction: rate_x: " << angle_rate_cmd.x << " rate_y: " << angle_rate_cmd.y << "  rate_z: " << angle_rate_cmd.z << " " << std::endl;
+        // angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
         // error_ang = cv::norm(diff);
         error_ang = std::abs(rotation.x) + std::abs(rotation.y);
         // error_dist = cv::norm(displacement);
@@ -254,16 +249,10 @@ int main(int argc, char** argv) {
         std::cout << "Error angle: " << error_ang << ", Error distance: " << error_dist << " " << std::endl;
         std::cout << " rotation : rotation_x: " << rotation.x << " rotation_y: " << rotation.y << " rotation_z: " << rotation.z << " " << std::endl;
         std::cout << " displacement : x: " << displacement.x << " y: " << displacement.y << " z: " << displacement.z << " " << std::endl;
-        std::cout << " rotation rate: rotation rate_x: " << angle_rate_cmd.x << " rotation rate_y: " << angle_rate_cmd.y << " rotation rotation_z: " << angle_rate_cmd.z << " " << std::endl;
-        std::cout << " direction rate: direction_x: " << direction.x << " direction rate_y: " << direction.y << " direction_z: " << direction.z << " " << std::endl;
-        // std::cout << " cmd_vx_x: " << cmd_vx.x << " cmd_vx_y: " << cmd_vx.y << " cmd_vx_z: " << cmd_vx.z << std::endl;
-        // std::cout << "Displacement px: " << displacement.x << ", " << displacement.y << ", " << displacement.z << std::endl;
-        // std::cout << "Displacement: " << translation.x << ", " << translation.y << ", " << translation.z << std::endl;
-        // std::cout << " Error: " << error_ang << " Error dist: " << error_dist << " YawErr: " << yawErr << " PitchErr: " << pitchErr << " RollErr: " << rollErr << std::endl;
-        std::stringstream ss;
-        // YawRate_cam, PitchRate_cam, YawRate_drone, drone_x, drone_y, drone_z \n 
-        // ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "\n";
-        // std::string data_0 = ss.str();  
+        std::cout << " rotation rate: rotation rate_x: " << angle_rate_cmd.x << " rotation rate_y: " << angle_rate_cmd.y << " rotation rate_z: " << angle_rate_cmd.z << " " << std::endl;
+        std::cout << " direction rate: direction_x: " << translation.x << " direction rate_y: " << translation.y << " direction_z: " << translation.z << " " << std::endl;
+        
+        std::stringstream ss; 
         
         double send_ts = 0;
         if (!client.rotationOnly && !hasNaN(cmd_vx) && !hasNaN(angle_rate_cmd)){

@@ -1,9 +1,4 @@
-#include <opencv2/core.hpp>
-#include <opencv2/calib3d.hpp>
-#include <cmath>
-#include <iostream>
-#include <unordered_map>
-#include <string>
+#include "Utils.h"
 // #include "AlgoLogger.hpp"
 
 bool hasNaN(const cv::Point3f& p) {
@@ -11,7 +6,7 @@ bool hasNaN(const cv::Point3f& p) {
 }
 
 
-cv::Point3f activation(cv::Point3f x, float k = 1.0f, std::string function = "sigmoid") {
+cv::Point3f activation(cv::Point3f x, float k , std::string function ) {
     if (function == "sigmoid") {
         cv::Point3f sig;
         // float k = 1.0f;  // increase → steeper (toward tanh), decrease → gentler
@@ -38,18 +33,11 @@ cv::Point3f activation(cv::Point3f x, float k = 1.0f, std::string function = "si
 }
 
 
-using Clock = std::chrono::steady_clock;
-struct YPRDeg {
-    double yaw;   // Z
-    double pitch; // Y
-    double roll;  // X
-};
-
 cv::Point3f ConvertCVToUE(const cv::Point3f& p)
 {
     return cv::Point3f(
         p.z,      // forward
-        -p.x,      // right
+        p.x,      // right
         -p.y      // up
     );
 }
@@ -57,27 +45,27 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p)
 cv::Point3f ConvertCVToUERot(const cv::Point3f& r)
 {
     return cv::Point3f(
-        -r.z,      // Pitch (Y axis)
-        -r.y,      // Yaw   (Z axis)
-        r.x      // Roll  (X axis)
+        r.y,      // Pitch (Y axis)
+        -r.x,      // Yaw   (Z axis)
+        r.z      // Roll  (X axis)
     );
 }
 
-static double wrapDeg(double a)
+double wrapDeg(double a)
 {
     a = std::fmod(a + 180.0, 360.0);
     if (a < 0) a += 360.0;
     return a - 180.0;
 }
 
-static double tanhRate(double errDeg, double maxRateDegS, double k)
+double tanhRate(double errDeg, double maxRateDegS, double k)
 {
     // k is “gain” in 1/deg (try 0.03 to 0.10)
     return maxRateDegS * std::tanh(k * errDeg);
 }
 
 // ZYX (yaw-pitch-roll) extraction
-static cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
+cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
 {
     CV_Assert(R.rows == 3 && R.cols == 3);
 
@@ -105,12 +93,12 @@ static cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
 
     const double rad2deg = 180.0 / CV_PI;
     // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
+    // return cv::Point3f((float)(roll * rad2deg), (float)(pitch * rad2deg), (float)(yaw * rad2deg));
     return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
-    // return cv::Point3f((float)(yaw), (float)(pitch), (float)(roll));
 }
 
 
-static std::unordered_map<std::string,std::string> parseFlags(int argc, char** argv)
+std::unordered_map<std::string,std::string> parseFlags(int argc, char** argv)
 {
     std::unordered_map<std::string,std::string> kv;
     for(int i = 1; i + 1 < argc; ++i)
@@ -125,7 +113,7 @@ static std::unordered_map<std::string,std::string> parseFlags(int argc, char** a
     return kv;
 }
 
-static std::string getStr(const std::unordered_map<std::string,std::string>& kv,
+std::string getStr(const std::unordered_map<std::string,std::string>& kv,
                           const std::string& key,
                           const std::string& def)
 {
@@ -133,7 +121,7 @@ static std::string getStr(const std::unordered_map<std::string,std::string>& kv,
     return (it != kv.end()) ? it->second : def;
 }
 
-static int getInt(const std::unordered_map<std::string,std::string>& kv,
+int getInt(const std::unordered_map<std::string,std::string>& kv,
                   const std::string& key,
                   int def)
 {
@@ -146,7 +134,7 @@ static int getInt(const std::unordered_map<std::string,std::string>& kv,
 
 // Convert a double to a string where the decimal point is replaced with '_'.
 // Example: 11829.695398 -> "11829_695398"
-static std::string timeToUnderscoreString(int precision = 6) {
+std::string timeToUnderscoreString(int precision) {
     const auto t_now = Clock::now().time_since_epoch();
     double value = std::chrono::duration<double>(t_now).count();
     std::ostringstream oss;
