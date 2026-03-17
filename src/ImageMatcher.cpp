@@ -112,13 +112,13 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
     cv::cvtColor(target, targetImageGray, cv::COLOR_BGR2GRAY);
 
     // Initialize SIFT detector and BFMatcher
-    sift = cv::SIFT::create();
-    // sift = cv::SIFT::create(5000,    // nfeatures    — default 0 (unlimited, but keeps best), set explicitly
-    //                         3,       // nOctaveLayers — default 3, increase for more features
-    //                         0.03,    // contrastThreshold — default 0.04, LOWER = more features
-    //                         10,      // edgeThreshold — default 10, HIGHER = more features  
-    //                         1.6      // sigma — default 1.6, leave this
-    //                         );
+    // sift = cv::SIFT::create();
+    sift = cv::SIFT::create(5000,    // nfeatures    — default 0 (unlimited, but keeps best), set explicitly
+                            3,       // nOctaveLayers — default 3, increase for more features
+                            0.05,    // contrastThreshold — default 0.04, LOWER = more features
+                            10,      // edgeThreshold — default 10, HIGHER = more features  
+                            1.6      // sigma — default 1.6, leave this
+                            );
     // matcher = cv::BFMatcher::create(cv::NORM_L2);
 
     matcherFlann = cv::FlannBasedMatcher(cv::makePtr<cv::flann::KDTreeIndexParams>(5),
@@ -126,16 +126,16 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
 
     height = target.rows;
     width = target.cols;
-    cameraMatrix = (cv::Mat_<float>(3,3) <<
-                    width,   0,      width / 2.0f,
-                    0,      height,  height / 2.0f,
-                    0,       0,      1.0f
-                    );
+    cameraMatrix = (cv::Mat_<float>(3,3) << 
+                    width / 2.0f, 0,            width / 2.0f,
+                    0,            width / 2.0f, height / 2.0f,
+                    0,            0,            1.0f);
     // Detect and compute features for target
     cv::Mat targetDesc;
     // detectAndComputegrid(targetImageGray, targetKeypoints, targetDescriptors);
     detectAndCompute(targetImageGray, targetKeypoints, targetDesc);
     targetDesc.convertTo(targetDescriptors, CV_32F);
+    
     std::cout << "Target keypoints size: " << targetKeypoints.size() << std::endl;
 }
 
@@ -242,7 +242,7 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
     // matcher->knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
 
     // Apply Lowe's ratio test and cross-check
-    const float ratio = 0.95f;
+    const float ratio = 0.75f;
 
     std::vector<cv::DMatch> goodAB, goodBA;
 
@@ -269,7 +269,7 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
             }
         }
     }
-    return goodAB;
+    return crossCheckedMatches;
 }
 
 
@@ -280,7 +280,7 @@ std::vector<cv::DMatch> ImageMatcher::gridFilterMatches(const std::vector<cv::DM
     float cellW = width  / gridCols;
     float cellH = height / gridRows;
 
-    std::cout<< "width: "<< width << "height: " << height <<std::endl;
+    std::cout<< "width: "<< width << " height: " << height <<std::endl;
     // grid of matches per cell
     std::vector<std::vector<cv::DMatch>> grid(gridCols * gridRows);
 
@@ -328,7 +328,7 @@ void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT )
 }
 
 
-std::tuple<cv::Mat, cv::Point3f, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::Mat& inputImage){
+std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::Mat& inputImage){
     if (!inputImage.empty()){
         cv::Mat inputGray;
         cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
@@ -341,10 +341,9 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point3f> ImageMatcher::getAlignmentDirectio
         // goodMatches = goodMatcher(inputDescriptors);
         auto matches = goodMatcher(inputDescriptors);
         goodMatches = gridFilterMatches(matches, inputKeypoints);
-        // matcher->match(inputDescriptors, targetDescriptors, matches);
-        // std::vector<cv::Point2f> inputMatches, targetMatches;
+
         // std::cout << "Matched Descriptors" << std::endl;
-        if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0), cv::Point3f(0,0,0)};
+        if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0)};
         for (const auto& m : goodMatches) {
             const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
             const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
@@ -352,39 +351,48 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point3f> ImageMatcher::getAlignmentDirectio
             inputMatches.push_back(kpInput.pt);
             targetMatches.push_back(kpTarget.pt);
         }
+
+        // Setup termination criteria (Max 30 iterations or 0.01 epsilon)
+        cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01);
+
+        // Refine the points
+        // winSize is the search window (5x5 or 11x11 is standard)
+        cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+        cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
         // std::cout << "Prepared Matches" << std::endl;
     }
-    cv::Mat translation, rotationMatrix;
-    // std::cout << "Find translation " << std::endl;
-    
-    findAnddecomposeEssentialMat(rotationMatrix, translation);
-    //
-    // findAnddecomposeEssentialMat(rotationMatrix, translation);
-    // std::cout << "Translation Vector " << std::endl;
-    double translation_norm = cv::norm(translation);
 
-    // if (translation_norm < 0.1){
-    cv::Mat inlierMask;
-    cv::Mat H = cv::findHomography(inputMatches, targetMatches, cv::RANSAC, 3.0, inlierMask);
+    std::cout << "Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
+    // 1. Run Homography
+    cv::Mat maskH;
+    cv::Mat HomographyMat = cv::findHomography(inputMatches, targetMatches, cv::RANSAC, 2.0, maskH);
+    float ratioH = (float)cv::countNonZero(maskH) / inputMatches.size();
+    std::cout << " Homography ratio " << ratioH << std::endl;
+    // 2. Run Essential
+    cv::Mat maskE;
+    cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, maskE);
+    float ratioE = (float)cv::countNonZero(maskE) / inputMatches.size();
+    std::cout << " Essential ratio " << ratioE << std::endl;
 
-    // Count homography inliers vs Essential matrix inliers
-    int hInliers = cv::countNonZero(inlierMask);
-    float inlierRatio = (float)hInliers / inputMatches.size();
-    std::cout << "inlier ratio Homography: " << inlierRatio << " \n"; 
-    if (inlierRatio > 0.8) {
+    cv::Mat rotationMatrix = cv::Mat::eye(3, 3, CV_32F);
+    cv::Point3f world_direction = cv::Point3f(0,0,0);
+    // 3. The Logic
+    if (ratioH > 0.98 && ratioE < 0.90) {
+        // This is almost certainly Pure Rotation.
+        // Use the Homography-to-Rotation math.
         std::vector<cv::Mat> Rs, ts, normals;
-        int nSolutions = cv::decomposeHomographyMat(H, cameraMatrix, Rs, ts, normals);
-
+        int nSolutions = cv::decomposeHomographyMat(HomographyMat, cameraMatrix, Rs, ts, normals);
+        std::cout << " Homography nSolutions " << nSolutions << std::endl;
         // Filter to physically valid solutions
         // Need inlier points only for filtering
         std::vector<cv::Point2f> inlierInput, inlierTarget;
-        for (int i = 0; i < inlierMask.rows; i++) {
-            if (inlierMask.at<uchar>(i)) {
+        for (int i = 0; i < maskH.rows; i++) {
+            if (maskH.at<uchar>(i)) {
                 inlierInput.push_back(inputMatches[i]);
                 inlierTarget.push_back(targetMatches[i]);
             }
         }
-
+        std::cout << " Homography nMatches " << inlierInput.size() << std::endl;
         // Filter using visible points
         std::vector<int> validSolutions;
         cv::filterHomographyDecompByVisibleRefpoints(
@@ -395,23 +403,108 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point3f> ImageMatcher::getAlignmentDirectio
         );
 
         // validSolutions now contains indices of physically plausible solutions
-        rotationMatrix = Rs[validSolutions[0]];
-        // Pick best solution using roll=0 prior
-        // cv::Mat bestR;
-        // double minRoll = 1e9;
-        // for (int idx : validSolutions) {
-        //     cv::Point3f angles = rotmatToYPRDeg_ZYX(Rs[idx]);
-        //     if (std::abs(angles.z) < minRoll) {
-        //         minRoll = std::abs(angles.z);
-        //         rotationMatrix = Rs[idx];
-        //     }
+        std::cout << "Rotation only " << std::endl;
+        auto bestR = Rs[validSolutions[0]];
+        cv::transpose(bestR, rotationMatrix);
+    } else {
+        cv::Mat bestR, bestT, inliersE;
+        // This is General Motion (even if it's a flat scene).
+        // Use recoverPose.
+        std::cout << " in RecoverPose " << std::endl;
+        int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, bestR, bestT, inliersE);
+        std::cout << " Recoverpose inliers " << inlierCount << std::endl;
+        std::vector<cv::Point2f> inliers1, inliers2;
+        for(int i = 0; i < inliersE.rows; i++) {
+            if(inliersE.at<uchar>(i)) {
+                inliers1.push_back(inputMatches[i]);
+                inliers2.push_back(targetMatches[i]);
+            }
+        }
+        std::cout << " Before ReprojectionError " << std::endl;
+        double meanError = getReprojectionError(inliers1, inliers2, bestR, bestT);
+        std::cout << " ReprojectionError " << meanError << std::endl;
+        // if (meanError < 4){
+        //     rotationMatrix = bestR;
+        //     world_direction = cv::Point3f( bestT.at<double>(0,0), bestT.at<double>(1,0), bestT.at<double>(2,0));
         // }
+        // rotationMatrix = bestR;
+        cv::Mat t_inv;
+        cv::transpose(bestR, rotationMatrix);
+        t_inv = -rotationMatrix * bestT;
+        world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
+        std::cout << "Rotation and translation " << std::endl;
+    }
+    
+    return {rotationMatrix, world_direction};
+}
+
+
+double ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1, 
+                             const std::vector<cv::Point2f>& pts2, 
+                             cv::Mat& Rf, cv::Mat& tf) 
+{    
+    cv::Mat R, t;
+    Rf.convertTo(R, CV_32F);
+    tf.convertTo(t, CV_32F);
+    // 1. Create Projection Matrices
+    // P1 = K * [I | 0]
+    cv::Mat P1 = cv::Mat::zeros(3, 4, CV_32F);
+    // cv::Mat::eye(3, 3, CV_64F).copyTo(P1(cv::Rect(0, 0, 3, 3)));
+    P1(cv::Rect(0, 0, 3, 3)) = cv::Mat::eye(3, 3, CV_32F);
+    P1 = cameraMatrix * P1;
+
+    // P2 = K * [R | t]
+    cv::Mat P2 = cv::Mat::zeros(3, 4, CV_32F);
+    R.copyTo(P2(cv::Rect(0, 0, 3, 3)));
+    t.copyTo(P2(cv::Rect(3, 0, 1, 3)));
+    P2 = cameraMatrix * P2;
+
+    // 2. Triangulate Points to 4D (Homogeneous coordinates)
+    cv::Mat pts4D;
+    cv::triangulatePoints(P1, P2, pts1, pts2, pts4D);
+
+    double totalError = 0;
+    int count = pts4D.cols;
+    std::vector<cv::Point3f> objectPoints;
+    for (int i = 0; i < count; i++) {
+        // 3. Convert from Homogeneous to 3D Cartesian [x, y, z]
+        float w = pts4D.at<float>(3, i);
+        cv::Mat X = (cv::Mat_<float>(3,1) << pts4D.at<float>(0, i) / w, 
+                                               pts4D.at<float>(1, i) / w, 
+                                               pts4D.at<float>(2, i) / w);
+        objectPoints.push_back(cv::Point3f(pts4D.at<float>(0, i)/w, 
+                                      pts4D.at<float>(1, i)/w, 
+                                      pts4D.at<float>(2, i)/w));
+        // 4. Project 3D point back to Image 2 plane
+        // x = K * (R*X + t)
+        cv::Mat x_hom = cameraMatrix * (R * X + t);
+        cv::Point2f projected_pt(
+            x_hom.at<float>(0) / x_hom.at<float>(2),
+            x_hom.at<float>(1) / x_hom.at<float>(2)
+        );
+
+        // 5. Calculate Euclidean distance (L2 Norm)
+        float error = cv::norm(projected_pt - pts2[i]);
+        totalError += error;
     }
 
-    auto rotVec = computeRotation();
-    cv::Point3f world_direction = cv::Point3f( translation.at<double>(0,0), translation.at<double>(1,0), translation.at<double>(2,0));
-   
-    return {rotationMatrix, world_direction, rotVec};
+    // 6. Refine R and t using solvePnP
+    // solvePnP outputs rotation as a 3x1 vector (Rodrigues), so we convert
+    cv::Mat rvec, tvec;
+    cv::Rodrigues(Rf, rvec); 
+    tvec = tf.clone();
+
+    // The "Refining" Magic: useExtrinsicGuess = true
+    cv::solvePnP(objectPoints, pts2, cameraMatrix, cv::noArray(), 
+                rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+
+    // 7. Convert rvec back to Matrix
+    cv::Mat refinedR;
+    cv::Rodrigues(rvec, refinedR);
+    // tvec is now the refined translation
+    tf = tvec;
+    Rf = refinedR;
+    return totalError / count;
 }
 
 cv::Mat ImageMatcher::formTransf(const cv::Mat& R, const cv::Mat& t) {
@@ -482,28 +575,30 @@ int ImageMatcher::sumZCalRelativeScale(const cv::Mat& Rotation, const cv::Mat& t
 
 cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputImage)
 {
-    cv::Mat inputGray;
-    cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
+    // std::cout << "target gray size: " << targetImageGray.size() << std::endl;
+    // std::cout << "input image size: " << inputImage.size() << std::endl;
+    
+    cv::cvtColor(inputImage, inputImageGray, cv::COLOR_BGR2GRAY);
 
     std::vector<cv::KeyPoint> inputKeypoints;
     cv::Mat inputDescriptors;
-    // detectAndComputegrid(inputGray, inputKeypoints, inputDescriptors);
+    // detectAndComputegrid(inputImageGray, inputKeypoints, inputDescriptors);
     cv::Mat inputDesc;
-    detectAndCompute(inputGray, inputKeypoints, inputDesc);
+    detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
     inputDesc.convertTo(inputDescriptors,   CV_32F);
     // std::vector<cv::DMatch> matches;
     // matcher->match(inputDescriptors, targetDescriptors, matches);
 
     std::vector<cv::DMatch> goodMatches;
-    std::cout << "Target image keypoint size: " << targetKeypoints.size() << std::endl;
-    std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
+    // std::cout << "Target image keypoint size: " << targetKeypoints.size() << std::endl;
+    // std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
     auto matches = goodMatcher(inputDescriptors);
-    std::cout << "Found matches of size: " << matches.size() << std::endl;
+    // std::cout << "Found matches of size: " << matches.size() << std::endl;
     goodMatches = gridFilterMatches(matches, inputKeypoints);
-    std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
+    // std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
     if (goodMatches.empty()) return cv::Point3f(0,0,0);
     float zMotion = 0; // inward/outward
-    cv::Point2f center(inputGray.cols/2.0f, inputGray.rows/2.0f);
+    cv::Point2f center(inputImageGray.cols/2.0f, inputImageGray.rows/2.0f);
     for (const auto& m : goodMatches) {
         const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
         const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
@@ -519,8 +614,18 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
         zMotion += (dot > 0) ? -1.0f : 1.0f;
     }
 
-    // zMotion /= goodMatches.size(); // average tendency
-    if(std::abs(zMotion) < 0.35 * goodMatches.size()) zMotion = 0; 
+    // Setup termination criteria (Max 30 iterations or 0.01 epsilon)
+    cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01);
+
+    // Refine the points
+    // winSize is the search window (5x5 or 11x11 is standard)
+    cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+    cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+    // std::cout << "Prepared Matches" << std::endl;
+
+    zMotion /= goodMatches.size(); // average tendency
+    if (std::abs(zMotion) < 0.2) zMotion = 0;
+    // if(std::abs(zMotion) < 0.35 * goodMatches.size()) zMotion = 0; 
 
     // Robust affine (rotation + uniform scale + translation), rejects outliers
     cv::Mat inliers;
@@ -575,8 +680,6 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     // Return center shift, and zoom proxy
     return cv::Point3f((float)dxc, (float)dyc, (float)zMotion);
 }
-
-
 
 cv::Point3f ImageMatcher::computeRotation()
 {

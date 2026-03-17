@@ -231,6 +231,10 @@ void MetadataTcpClient::receiveCommand() {
                 rotationOnly.store(true);
                 translationOnly.store(false); // reset translation-only flag
                 // stopTranslation.store(true); // stop translation if switching to rotation-only
+            } else if (cmd == "resume_both") {
+                rotationOnly.store(false);
+                translationOnly.store(false); // reset translation-only flag
+                // stopTranslation.store(true); // stop translation if switching to rotation-only
             } else if (cmd == "translation_only") {
                 translationOnly.store(true);
                 rotationOnly.store(false); // reset rotation-only flag

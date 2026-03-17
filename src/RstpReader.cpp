@@ -81,6 +81,7 @@ void RtspReader::readerLoop() {
             continue;
         }
 
+        // std::cout << " width_: "<< width_ << " height_: " << height_ << std::endl;
         cv::Mat frame(height_, width_, CV_8UC3, buffer.data());
 
         {

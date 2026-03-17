@@ -45,9 +45,9 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p)
 cv::Point3f ConvertCVToUERot(const cv::Point3f& r)
 {
     return cv::Point3f(
-        r.y,      // Pitch (Y axis)
-        -r.x,      // Yaw   (Z axis)
-        r.z      // Roll  (X axis)
+        r.y,    // Unreal Pitch ← OpenCV pitch (negate: Y points down in CV, up in UE)
+        r.x,    // Unreal Yaw   ← OpenCV yaw   (negate: Z forward flips handedness)
+        -r.z     // Unreal Roll  ← OpenCV roll   (same axis)
     );
 }
 
@@ -62,6 +62,39 @@ double tanhRate(double errDeg, double maxRateDegS, double k)
 {
     // k is “gain” in 1/deg (try 0.03 to 0.10)
     return maxRateDegS * std::tanh(k * errDeg);
+}
+
+// XYZ (roll-pitch-yaw) extraction
+cv::Point3f rotmatToYPRDeg_XYZ(const cv::Mat& R)
+{
+    CV_Assert(R.rows == 3 && R.cols == 3);
+
+    const double r00 = R.at<double>(0,0), r01 = R.at<double>(0,1), r02 = R.at<double>(0,2);
+    const double r10 = R.at<double>(1,0), r11 = R.at<double>(1,1), r12 = R.at<double>(1,2);
+    const double r20 = R.at<double>(2,0), r21 = R.at<double>(2,1), r22 = R.at<double>(2,2);
+
+    double yaw, pitch, roll;
+
+    // pitch = asin(-r20)
+    yaw = std::asin(std::clamp(-r20, -1.0, 1.0));
+
+    const double cp = std::cos(yaw);
+
+    if (std::abs(cp) > 1e-8) {
+        // roll = atan2(r21, r22)
+        pitch = std::atan2(r21, r22);
+        // yaw  = atan2(r10, r00)
+        roll  = std::atan2(r10, r00);
+    } else {
+        // Gimbal lock: roll and yaw coupled
+        roll = 0.0;
+        pitch  = std::atan2(-r01, r11);
+    }
+
+    const double rad2deg = 180.0 / CV_PI;
+    // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
+    // return cv::Point3f((float)(roll * rad2deg), (float)(pitch * rad2deg), (float)(yaw * rad2deg));
+    return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
 }
 
 // ZYX (yaw-pitch-roll) extraction

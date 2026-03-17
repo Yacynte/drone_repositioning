@@ -57,15 +57,15 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     motion_log_2_time_normalized = motion_log_2['time'] - time_offset
     
     # Get constant values from motion_log_1 (use first value since they're all constant)
-    const_pos_x = motion_log_1['pos_x'].iloc[0]
-    const_pos_y = motion_log_1['pos_y'].iloc[0]
-    const_pos_z = motion_log_1['pos_z'].iloc[0]
-    const_pitch = motion_log_1['pitch'].iloc[0]
-    const_yaw = motion_log_1['yaw'].iloc[0]
-    const_roll = motion_log_1['roll'].iloc[0]
-    const_rel_pitch = motion_log_1['rel_pitch'].iloc[0]
-    const_rel_yaw = motion_log_1['rel_yaw'].iloc[0]
-    const_rel_roll = motion_log_1['rel_roll'].iloc[0]
+    const_pos_x = motion_log_1['pos_x'].iloc[-1]
+    const_pos_y = motion_log_1['pos_y'].iloc[-1]
+    const_pos_z = motion_log_1['pos_z'].iloc[-1]
+    const_pitch = motion_log_1['pitch'].iloc[-1]
+    const_yaw = motion_log_1['yaw'].iloc[-1]
+    const_roll = motion_log_1['roll'].iloc[-1]
+    const_rel_pitch = motion_log_1['rel_pitch'].iloc[-1]
+    const_rel_yaw = motion_log_1['rel_yaw'].iloc[-1]
+    const_rel_roll = motion_log_1['rel_roll'].iloc[-1]
     
     # Create constant arrays with same length as motion_log_2
     n_points = len(motion_log_2)

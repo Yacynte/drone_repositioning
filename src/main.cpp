@@ -12,8 +12,8 @@
 #include <string>
 #include <numeric>
 
-int imgWidth = 640;
-int imgHeight = 480;
+int imgWidth ;
+int imgHeight ;
 bool unrealMode = true;
 double error_ang = 1.0;
 double threshold_error = 5;
@@ -21,7 +21,7 @@ double error_dist = 1.0;
 // double dist_threshold = 30; // cm
 // double dist_threshold = 5; //px
 bool complete = false;
-double dist_threshold = 0.15 * cv::norm(cv::Point2f(imgHeight, imgWidth));
+// double dist_threshold = 0.15 * cv::norm(cv::Point2f(imgHeight, imgWidth));
 // double error_dist = imgWidth; // initial large displacement
 
 
@@ -77,8 +77,8 @@ int main(int argc, char** argv) {
     // std::string stream_url;
     // int camera_index = 0;
 
-    // Load target image
-    ImageMatcher matcher(target_image_path);
+    // // Load target image
+    // ImageMatcher matcher(target_image_path);
     // Speed mapping (smooth saturating)
     // Smoothing factors
     int increment = 0;
@@ -92,8 +92,8 @@ int main(int argc, char** argv) {
     double time_now = 0 ;
     double old_img_ts = 0;
 
-    float v_max = 30.0;           // cm/s or drone units
-    float w_max = 1.0;             // degrees/s
+    float v_max = 20.0;           // cm/s or drone units
+    float w_max = 10.0;             // degrees/s
     float pitch_rate_max = 2;
     cv::Point3f direction = cv::Point3f(0,0,0);
     cv::Point3f last_cmd_vx = cv::Point3f(0,0,0);
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
             //     return -1;
             // }
         }
-        std::cout << "Stream / Camera can be opened" << std::endl;
+        // std::cout << "Stream / Camera can be opened" << std::endl;
         // prefer MJPEG/FourCC if stream provides it
         cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
     }
@@ -135,7 +135,9 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    if (!unreal_test) imgHeight = imgHeight_; imgWidth = imgWidth_;
+    // if (!unreal_test) imgHeight = imgHeight_; imgWidth = imgWidth_;
+    imgHeight = imgHeight_; 
+    imgWidth = imgWidth_;
 
     cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
@@ -147,14 +149,18 @@ int main(int argc, char** argv) {
     float diag = std::sqrt(imgHeight*imgHeight + imgWidth*imgWidth);
     // cv::Mat frame;
     
-    RtspReader reader(stream_url,imgWidth, imgHeight, unreal_test);
+    RtspReader reader(stream_url, imgWidth, imgHeight, unreal_test);
     std::cout << "Unreal test: " << unreal_test << std::endl;
     if(!unreal_test) reader.start(&cap);
     else reader.start();
+
+    // Load target image
+    ImageMatcher matcher(target_image_path);
     
     cv::Mat frame;
     std::vector<int> direction_history;
     int switching = 0;
+    bool rotOld, transOld;
     while (true) {
         // std::cout << "Status of Start/Stop flags - Start: " << client.startRepositioning.load() << ", Stop: " << client.stopRepositioning.load() << std::endl;
         if (!client.startRepositioning.load()) {
@@ -172,7 +178,7 @@ int main(int argc, char** argv) {
         }
         // cap >> frame;
         if (!reader.getFrame(frame)) {
-            std::cout << "No available frame" << std::endl;
+            // std::cout << "No available frame" << std::endl;
             continue;}
         // When image arrives:
         double img_ts = AlgoLogger::nowWallSec();
@@ -183,15 +189,15 @@ int main(int argc, char** argv) {
         auto displacement_ = matcher.getAlignmentDisplacementRansac(frame);
         std::cout << " Displacement (pixels): " << displacement_ << std::endl;
         // std::cout << "Processing frame for Rotation..." << std::endl;
-        auto [rotationMatrix, direction1, rotVec]  = matcher.getAlignmentDirection();
-        direction1 *= 100;           // convert to cm (tune this scale factor based on actual camera FOV and target size)
+        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection();
+        direction1 *= cv::norm(displacement_)/100;           // convert to cm (tune this scale factor based on actual camera FOV and target size)
         // cv::Point3f direction = cv::Point3f(0,0,0);
         cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
         cv::Mat diff = rotationMatrix - I;
         cv::Mat world_rotation_vec;
         cv::Rodrigues(rotationMatrix, world_rotation_vec);
         world_rotation_vec.convertTo(world_rotation_vec, CV_64F);
-        cv::Point3f rotation_vec = rotmatToYPRDeg_ZYX(rotationMatrix);
+        cv::Point3f rotation_vec = rotmatToYPRDeg_XYZ(rotationMatrix);
         // world_rotation_vec *= 180.0 / CV_PI;
         cv::Mat axis = world_rotation_vec / cv::norm(world_rotation_vec);
         // const float rad2deg = 180.0 / CV_PI;
@@ -209,7 +215,8 @@ int main(int argc, char** argv) {
             // angle_rate_cmd.z = -pitchRateCmd;
 
             translation = ConvertCVToUE(direction1);
-            displacement = ConvertCVToUE(displacement_);
+            displacement = ConvertCVToUE(direction1);
+            // displacement = cv::norm(displacement) * translation;
             rotation = ConvertCVToUERot(rotation_vec);
             // rotation = ConvertCVToUERot(rotVec);
         }
@@ -240,7 +247,7 @@ int main(int argc, char** argv) {
         cmd_vx = alpha * cmd_vx + (1 - alpha) * last_cmd_vx;
         // std::cout << "Smoothed cmd_vx: " << cmd_vx << std::endl;
         std::cout << " rotation rate without correction: rate_x: " << angle_rate_cmd.x << " rate_y: " << angle_rate_cmd.y << "  rate_z: " << angle_rate_cmd.z << " " << std::endl;
-        // angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
+        angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
         // error_ang = cv::norm(diff);
         error_ang = std::abs(rotation.x) + std::abs(rotation.y);
         // error_dist = cv::norm(displacement);
@@ -255,14 +262,15 @@ int main(int argc, char** argv) {
         std::stringstream ss; 
         
         double send_ts = 0;
-        if (!client.rotationOnly && !hasNaN(cmd_vx) && !hasNaN(angle_rate_cmd)){
-            if ((std::abs(displacement.x) != 0) || (std::abs(displacement.y) > 2) || (std::abs(displacement.z) > 2) || (std::abs(angle_rate_cmd.y) > 2)){
+        if (!client.rotationOnly && !hasNaN(cmd_vx) && !hasNaN(angle_rate_cmd) && !complete){
+            // if ((std::abs(displacement.x) < 0.2) || (std::abs(displacement.y) > 2) || (std::abs(displacement.z) > 2)){
+            if (cv::norm(displacement) > 2){
                 float a = 0, b = 0, c = 0, d = 0;
-                if (std::abs(displacement.x) != 0) a = cmd_vx.x;
-                if (std::abs(displacement.y) > 2) b = cmd_vx.y;
-                if (std::abs(displacement.z) > 2) c = cmd_vx.z;
-                if (std::abs(angle_rate_cmd.x) > 2) d = angle_rate_cmd.x;
-                ss << d << "," << 0 << "," << 0 << "," << a << "," << b << "," << c << "," << "1" << "\n";
+                if (std::abs(displacement.x) > 1) a = cmd_vx.x;
+                if (std::abs(displacement.y) > 1) b = cmd_vx.y;
+                if (std::abs(displacement.z) > 1) c = cmd_vx.z;
+                if (std::abs(angle_rate_cmd.y) > 2) d = angle_rate_cmd.y;
+                ss << 0 << "," << d << "," << 0 << "," << a << "," << b << "," << c << "," << "1" << "\n";
                 data_to_send = ss.str();
                 // }
                 // ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "," << "0" << "\n";
@@ -280,14 +288,13 @@ int main(int argc, char** argv) {
                 
                 last_frame_init = AlgoLogger::nowWallSec();
             }
-            complete = true;
             last_frame = AlgoLogger::nowWallSec();
         }
-        if (!client.translationOnly && !hasNaN(angle_rate_cmd)){
-            if ((std::abs(rotation.x) > 2) || (std::abs(rotation.y) > 2)){
+        if (!client.translationOnly && !hasNaN(angle_rate_cmd) && !complete && (cv::norm(displacement) < 2)){
+            if ((std::abs(rotation.x) > 0.2) || (std::abs(rotation.y) > 0.2)){
                 float a = 0, b = 0, c = 0;
-                if (std::abs(rotation.x) > 2) a = angle_rate_cmd.x;
-                if (std::abs(rotation.y) > 2) b = angle_rate_cmd.y;
+                if (std::abs(rotation.x) > 0.2) a = angle_rate_cmd.x;
+                if (std::abs(rotation.y) > 0.2) b = angle_rate_cmd.y;
                 ss << a << "," << b << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
                 data_to_send = ss.str();
                 if (!client.SendMetadata(data_to_send)) 
@@ -299,7 +306,6 @@ int main(int argc, char** argv) {
                 
                 last_frame_init = AlgoLogger::nowWallSec();
             }
-            complete = true;
             last_frame = AlgoLogger::nowWallSec();
         }
       
@@ -309,9 +315,15 @@ int main(int argc, char** argv) {
         time_now = AlgoLogger::nowWallSec();
         std::cout << "Last time - last_frame_init: " << last_frame - last_frame_init <<std::endl;
         if(last_frame - last_frame_init >= 2) {
-            std::cout << "Arrived at destination" << std::endl;
-            break;
+            // std::cout << "Arrived at destination" << std::endl;
+            // break;
+            if (client.rotationOnly) std::cout << "Rotation Complete \n";
+            else if (client.translationOnly)  std::cout << "Translation Complete \n";
+            complete = true;
+            if (rotOld != client.rotationOnly || transOld != client.translationOnly) complete = false;
         }
+        rotOld = client.rotationOnly;
+        transOld = client.translationOnly;
         last_cmd_vx = cmd_vx;
         last_angle_rate = angle_rate_cmd;
         direction_history.push_back((displacement.x >= 0) ? 1 : -1);

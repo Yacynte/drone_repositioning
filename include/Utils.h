@@ -30,7 +30,7 @@ double tanhRate(double errDeg, double maxRateDegS, double k);
 
 // ZYX (yaw-pitch-roll) extraction
 cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R);
-
+cv::Point3f rotmatToYPRDeg_XYZ(const cv::Mat& R);
 
 std::unordered_map<std::string,std::string> parseFlags(int argc, char** argv);
 
