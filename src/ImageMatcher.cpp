@@ -431,10 +431,17 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         cv::Mat t_inv;
         cv::transpose(bestR, rotationMatrix);
         t_inv = -rotationMatrix * bestT;
-        world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
+        t_inv *= meanError ; // scale translation
+
+        double avg_disp = 0;
+        for (size_t i = 0; i < inputMatches.size(); i++) {
+            avg_disp += cv::norm(inputMatches[i] - targetMatches[i]);
+        }
+        avg_disp /= inputMatches.size();
+        if (avg_disp < 1.0) world_direction = cv::Point3f(0,0,0); // or keep previous
+        else world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
         std::cout << "Rotation and translation " << std::endl;
     }
-    
     return {rotationMatrix, world_direction};
 }
 

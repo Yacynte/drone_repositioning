@@ -49,7 +49,7 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     Uses motion_log_2's time axis for both datasets (motion_log_1 values are constant, so time doesn't matter).
     Extends constant ground truth values across the entire time duration.
     """
-    fig, axes = plt.subplots(9, 1, figsize=(21, 16))
+    fig, axes = plt.subplots(6, 1, figsize=(21, 16))
     fig.suptitle('Ground Truth (MotionLog 1) vs Unreal Engine Path (MotionLog 2)', fontsize=16, fontweight='bold')
     
     # Normalize time: start from 0 (reference from motion_log_2's first time)
@@ -101,47 +101,25 @@ def plot_comparison(motion_log_1, motion_log_2, output_file='comparison_plot_pos
     axes[2].grid(True, alpha=0.3)
     
     # Plot Rotation X (Pitch)
-    axes[3].plot(motion_log_2_time_normalized, gt_pitch, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[3].plot(motion_log_2_time_normalized, motion_log_2['pitch'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[3].plot(motion_log_2_time_normalized, gt_rel_pitch, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[3].plot(motion_log_2_time_normalized, motion_log_2['rel_pitch'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
     axes[3].set_ylabel('Pitch (degrees)', fontsize=10)
     axes[3].legend(loc='best')
     axes[3].grid(True, alpha=0.3)
     
     # Plot Rotation Y (Yaw)
-    axes[4].plot(motion_log_2_time_normalized, gt_yaw, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[4].plot(motion_log_2_time_normalized, motion_log_2['yaw'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[4].plot(motion_log_2_time_normalized, gt_rel_yaw, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[4].plot(motion_log_2_time_normalized, motion_log_2['rel_yaw'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
     axes[4].set_ylabel('Yaw (degrees)', fontsize=10)
     axes[4].legend(loc='best')
     axes[4].grid(True, alpha=0.3)
     
     # Plot Rotation Z (Roll)
-    axes[5].plot(motion_log_2_time_normalized, gt_roll, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[5].plot(motion_log_2_time_normalized, motion_log_2['roll'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
+    axes[5].plot(motion_log_2_time_normalized, gt_rel_roll, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
+    axes[5].plot(motion_log_2_time_normalized, motion_log_2['rel_roll'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
     axes[5].set_ylabel('Roll (degrees)', fontsize=10)
     axes[5].legend(loc='best')
     axes[5].grid(True, alpha=0.3)
-    
-    # Plot Relative Rotation X (Relative Pitch)
-    axes[6].plot(motion_log_2_time_normalized, gt_rel_pitch, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[6].plot(motion_log_2_time_normalized, motion_log_2['rel_pitch'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
-    axes[6].set_ylabel('Rel. Pitch (degrees)', fontsize=10)
-    axes[6].legend(loc='best')
-    axes[6].grid(True, alpha=0.3)
-    
-    # Plot Relative Rotation Y (Relative Yaw)
-    axes[7].plot(motion_log_2_time_normalized, gt_rel_yaw, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[7].plot(motion_log_2_time_normalized, motion_log_2['rel_yaw'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
-    axes[7].set_ylabel('Rel. Yaw (degrees)', fontsize=10)
-    axes[7].legend(loc='best')
-    axes[7].grid(True, alpha=0.3)
-    
-    # Plot Relative Rotation Z (Relative Roll)
-    axes[8].plot(motion_log_2_time_normalized, gt_rel_roll, 'b-', label='MotionLog 1 (Ground Truth)', linewidth=2)
-    axes[8].plot(motion_log_2_time_normalized, motion_log_2['rel_roll'], 'r--', label='MotionLog 2 (UE Path)', linewidth=1.5, alpha=0.7)
-    axes[8].set_ylabel('Rel. Roll (degrees)', fontsize=10)
-    axes[8].set_xlabel('Time (seconds)', fontsize=10)
-    axes[8].legend(loc='best')
-    axes[8].grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')

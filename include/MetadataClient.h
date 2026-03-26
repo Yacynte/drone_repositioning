@@ -39,7 +39,7 @@ public:
     void startReceiver();
     void stopReceiver();
     void CloseConnectionhandler(int socket_to_close = -2); // -2 means close both, 0 for server_socket, 1 for client_socket
-
+    bool respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error);
     // int server_socket = -1; // connected client socket
 
     // flags (atomic = safe to write/read from different threads)
