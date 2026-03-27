@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
     std::vector<int> direction_history;
     int switching = 0;
     bool rotOld, transOld;
-
+    std::vector<float> reproject;
     while (true) {
         // std::cout << "Status of Start/Stop flags - Start: " << client.startRepositioning.load() << ", Stop: " << client.stopRepositioning.load() << std::endl;
         if (!client.startRepositioning.load()) {
@@ -189,16 +189,21 @@ int main(int argc, char** argv) {
         // Get alignment direction (x, y, z)
         // auto displacement_ = matcher.getAlignmentDisplacement(frame);
         // cv::Point3f displacement1;
-        auto displacement_ = matcher.getAlignmentDisplacementRansac(frame);
-        std::cout << " Displacement (pixels): " << displacement_ << std::endl;
+        // auto displacement_ = matcher.getAlignmentDisplacementRansac(frame);
+        // std::cout << " Displacement (pixels): " << displacement_ << std::endl;
         // std::cout << "Processing frame for Rotation..." << std::endl;
-        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection();
+        auto [rotationMatrix, direction1]  = matcher.getAlignmentDirection(frame);
         // direction1 *= cv::norm(displacement_);           // convert to cm (tune this scale factor based on actual camera FOV and target size)
         // cv::Point3f direction = cv::Point3f(0,0,0);
         // cv::Mat I = cv::Mat::eye(3, 3, rotationMatrix.type());
         // cv::Mat diff = rotationMatrix - I;
         float rot_error =  std::acos((cv::trace(rotationMatrix)[0] - 1)/2) * 180.0 / CV_PI;
         float trans_error = cv::norm(direction1);
+        if (reproject.size() >= 10) {
+            reproject.erase(reproject.begin());
+        }
+        reproject.push_back(trans_error);
+        if (trans_error > 0.1*imgWidth) continue;
         cv::Mat world_rotation_vec;
         cv::Rodrigues(rotationMatrix, world_rotation_vec);
         world_rotation_vec.convertTo(world_rotation_vec, CV_64F);
@@ -256,7 +261,7 @@ int main(int argc, char** argv) {
         // error_ang = cv::norm(diff);
         // error_dist = cv::norm(displacement);
         // error_dist = abs(translation.x) + abs(translation.y) + abs(translation.z);
-        error_dist = cv::norm(cv::Point2f(displacement.z, displacement.y));
+        // error_dist = cv::norm(cv::Point2f(displacement.z, displacement.y));
         std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << " " << std::endl;
         std::cout << " rotation : rotation_x: " << rotation.x << " rotation_y: " << rotation.y << " rotation_z: " << rotation.z << " " << std::endl;
         std::cout << " displacement : x: " << displacement.x << " y: " << displacement.y << " z: " << displacement.z << " " << std::endl;
@@ -265,13 +270,31 @@ int main(int argc, char** argv) {
         
         std::stringstream ss; 
         
-        double send_ts = 0;
+        // double send_ts = 0;
 
-        send_ts = AlgoLogger::nowWallSec();
-        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, trans_error)){
+        auto send_ts = AlgoLogger::nowWallSec();
+        
+        double mean_trans_error = 10;
+        if (reproject.size() == 10) {
+            double sum = std::accumulate(reproject.begin(), reproject.end(), 0.0);
+            mean_trans_error = sum / 10.0;
+        }
+
+        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error)){
             std::cout << "Arrived at target \n";
             break;
         }
+
+        // if (mean_trans_error <= 7){
+        //     ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
+        // }
+        // else {
+        //     ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "," << "1" << "\n";
+        // }
+        // data_to_send = ss.str();
+        // if (!client.SendMetadata(data_to_send)) std::cerr << "Failed to send data. Check connection." << std::endl;
+        // if ((rot_error < 1) && (mean_trans_error < 7 )) return true;
+        
         // if (!client.translationOnly && !hasNaN(angle_rate_cmd) && !complete_rot){ // (cv::norm(displacement) < 2)){
         //     std::cout << "In if.... \n";
         //     if ((std::abs(rotation.x) > 1) || (std::abs(rotation.y) > 1)){

@@ -324,32 +324,42 @@ int main()
 
 bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error) {
 
-        static bool doingRot = true;
+        static bool doingTrans = true;
         static float targetRot = 10.0f;
-        static float targetTrans = 80.0f;
+        static float targetTrans = 10.0f;
+        static float minRot = 1.0f;
+        static float minTrans = 3.0f;
 
-        if (doingRot && !translationOnly) {
-            std::stringstream ss;
+        if ((rot_error < minRot) && (trans_error < minTrans)) return true;
+
+        if(doingTrans && !rotationOnly) {
+            
+            if (trans_error < targetTrans) {
+                doingTrans = false;
+                targetRot = std::max(targetRot -2, minRot); 
+            }
+            else {
+                std::stringstream ss;
+                ss << 0 << "," << 0 << "," << 0 << "," << translation_rate.x << "," << translation_rate.y << "," << translation_rate.z << "," << "0" << "\n";
+                std::string data_to_send = ss.str();
+                if (!MetadataTcpClient::SendMetadata(data_to_send)){
+                    std::cout << "Could not send data \n";
+                }
+            }
+        }
+        
+        else if (!doingTrans && !translationOnly) { 
+            if (rot_error < targetRot) {
+                doingTrans = true;
+                targetTrans = std::max(targetTrans/2, minTrans);
+            }
+            else {
+                std::stringstream ss;
             ss << rotation_rate.x << "," << rotation_rate.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
             std::string data_to_send = ss.str();
             if (!MetadataTcpClient::SendMetadata(data_to_send)){
                 std::cout << "Could not send data \n";
             }
-            if (rot_error < targetRot) {
-                doingRot = false;
-                targetTrans = std::max(targetTrans/2, 10.0f);
-            }
-        }
-        else if(!doingRot && !rotationOnly) {
-            std::stringstream ss;
-            ss << 0 << "," << 0 << "," << 0 << "," << translation_rate.x << "," << translation_rate.y << "," << translation_rate.z << "," << "0" << "\n";
-            std::string data_to_send = ss.str();
-            if (!MetadataTcpClient::SendMetadata(data_to_send)){
-                std::cout << "Could not send data \n";
-            }
-            if (trans_error < targetTrans) {
-                doingRot = true;
-                targetRot = std::max(targetRot -2, 1.0f); 
             }
         }
         std::cout << " Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;

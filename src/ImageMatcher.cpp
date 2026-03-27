@@ -331,12 +331,15 @@ void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT )
 std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::Mat& inputImage){
     if (!inputImage.empty()){
         cv::Mat inputGray;
-        cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(inputImage, inputImageGray, cv::COLOR_BGR2GRAY);
         // std::cout << "Converted to Gray" << std::endl;
         std::vector<cv::KeyPoint> inputKeypoints;
         cv::Mat inputDescriptors;
-        detectAndComputegrid(inputGray, inputKeypoints, inputDescriptors);
+        // detectAndComputegrid(inputImageGray, inputKeypoints, inputDescriptors);
         // std::cout << "Computed Keypoints and Descriptors" << std::endl;
+        cv::Mat inputDesc;
+        detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
+        inputDesc.convertTo(inputDescriptors,   CV_32F);
         std::vector<cv::DMatch> goodMatches;
         // goodMatches = goodMatcher(inputDescriptors);
         auto matches = goodMatcher(inputDescriptors);
@@ -430,18 +433,30 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         // rotationMatrix = bestR;
         cv::Mat t_inv;
         cv::transpose(bestR, rotationMatrix);
-        t_inv = -rotationMatrix * bestT;
+        // t_inv = -rotationMatrix * bestT;
+        // rotationMatrix = bestR;
+        t_inv = -bestT;
         t_inv *= meanError ; // scale translation
 
+        std::vector<double> flows;
         double avg_disp = 0;
         for (size_t i = 0; i < inputMatches.size(); i++) {
             avg_disp += cv::norm(inputMatches[i] - targetMatches[i]);
+            double d = cv::norm(inputMatches[i] - targetMatches[i]);
+            flows.push_back(d);
         }
         avg_disp /= inputMatches.size();
-        if (avg_disp < 1.0) world_direction = cv::Point3f(0,0,0); // or keep previous
+
+        double var = 0;
+        for (double f : flows) var += (f - avg_disp) * (f - avg_disp);
+        var /= flows.size();
+
+        if (avg_disp < 2.0 && var < 1.5) world_direction = cv::Point3f(0,0,0); // or keep previous
         else world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
         std::cout << "Rotation and translation " << std::endl;
     }
+    std::vector<cv::Point2f>().swap(inputMatches);
+    std::vector<cv::Point2f>().swap(targetMatches);
     return {rotationMatrix, world_direction};
 }
 
@@ -509,8 +524,8 @@ double ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1,
     cv::Mat refinedR;
     cv::Rodrigues(rvec, refinedR);
     // tvec is now the refined translation
-    tf = tvec;
-    Rf = refinedR;
+    // tf = tvec;
+    // Rf = refinedR;
     return totalError / count;
 }
 

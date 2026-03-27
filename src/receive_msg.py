@@ -45,7 +45,7 @@ class ReceiveMsg:
             # threading.Thread(target=self._accept_connections, daemon=True).start()
             threading.Thread(
                     target=self._receive_from_client,
-                    args=(self.server_socket, SERVER_IP),
+                    args=(self.server_socket, LISTEN_IP),
                     daemon=True
                 ).start()
         except Exception as e:
@@ -119,9 +119,9 @@ class ReceiveMsg:
             print(f"Sent to server: {message}")
             
             # Dequeue the message after sending
-            if not self.message_queue.empty():
-                dequeued = self.message_queue.get()
-                print(f"Dequeued message: {dequeued}")
+            # if not self.message_queue.empty():
+            #     dequeued = self.message_queue.get()
+            #     print(f"Dequeued message: {dequeued}")
             
             return True
         except Exception as e:
@@ -212,6 +212,8 @@ class MsgHandler:
         self.client_ip = LISTEN_IP           #"127.0.0.1"
         self.server_port = SERVER_PORT          #9001
         self.client_port = LISTEN_PORT          #9010
+        FPS = 20
+        self.dt = 1.0 / FPS
         self.threads = []  # Track all threads
         # Start a server
         self.msg_handler = ReceiveMsg()
@@ -221,7 +223,6 @@ class MsgHandler:
 
     def __start_handler(self):
         
-
         # Connect as client to unreal engine
         self.msg_handler.connect_to_server(self.server_ip, self.server_port)
 
@@ -229,9 +230,24 @@ class MsgHandler:
         self.msg_handler.connect_server_cpp(port=self.client_port, host=self.client_ip)
         # self.msg_handler.connect_to_server(self.client_ip, self.server_port)
         while True:
-            message = self.msg_handler.get_from_queue()  # Get and remove
-            if message:
-                self.msg_handler.send_to_server(message)
+            start = time.time()
+
+            latest_msg = None
+
+            # Drain the queue completely
+            while True:
+                msg = self.msg_handler.get_from_queue() # get and remove
+                if not msg:
+                    break
+                latest_msg = msg
+
+            # Send only the most recent
+            if latest_msg:
+                self.msg_handler.send_to_server(latest_msg)
+
+            # Maintain fixed rate
+            elapsed = time.time() - start
+            time.sleep(max(0, self.dt - elapsed))
     
 
     def get_msg(self):
@@ -252,8 +268,8 @@ class MsgHandler:
 
 if __name__ == '__main__':
     msg_handler = MsgHandler()
-    result = msg_handler.get_msg()
-    print("Result: ", result)
+    # result = msg_handler.get_msg()
+    # print("Result: ", result)
     msg_handler.wait_for_threads()  # Wait for all threads before exiting
     
 
