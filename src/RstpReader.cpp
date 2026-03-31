@@ -51,13 +51,19 @@ void RtspReader::stop() {
 
 bool RtspReader::getFrame(cv::Mat& out) {
     if (!unreal_test_) {
-        cap->read(out);
-        return true;
+        if (cap == nullptr || !cap->isOpened()) { // guard
+            std::cerr << "Capture is null or not opened\n";
+            return false;
+        }
+        std::cout << "Reading image from drone \n";
+        bool success = cap->read(out);
+        if (!success || out.empty()) return false;
+        return !isImageDark(out);
     }
     std::lock_guard<std::mutex> lock(frameMutex_);
     if (lastFrame_.empty()) return false;
     out = lastFrame_.clone();
-    return true;
+    return !isImageDark(out);
 }
 
 void RtspReader::readerLoop() {
@@ -89,4 +95,18 @@ void RtspReader::readerLoop() {
             frame.copyTo(lastFrame_);
         }
     }
+}
+
+bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
+{
+    cv::Mat gray;
+    if (image.channels() == 1)
+        gray = image;
+    else
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+
+    cv::Scalar meanVal = cv::mean(gray);
+    std::cout << "image mean brightness: " << meanVal[0] << std::endl;
+
+    return meanVal[0] < threshold;
 }
