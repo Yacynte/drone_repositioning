@@ -322,21 +322,37 @@ int main()
 */
 
 
-bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error) {
+bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error, cv::Point3f translation) {
 
         static bool doingTrans = true;
         static float targetRot = 10.0f;
-        static float targetTrans = 10.0f;
-        static float minRot = 1.0f;
-        static float minTrans = 3.0f;
+        static float targetTrans = 30.0f;
+        static float minRot = 0.5f;
+        static float minTrans = 1.0f;
+        static StopDetector detector;
+        static int increment_switch = 0;
 
         if ((rot_error < minRot) && (trans_error < minTrans)) return true;
+
+        if (doingTrans && !rotationOnly) {
+            if (detector.update(translation)) { // if error has increased for 5 consecutive frames, stop movement commands to prevent oscillation
+                increment_switch += 1;
+                detector.reset(); // reset history after stopping
+                std::cout << "Increment switch triggered, stopping movement commands to prevent oscillation." << std::endl;
+            }
+            // else increment_switch = 0; // reset counter if not oscillating
+        }
+
+        if (increment_switch >= 3) {
+            translation_rate = cv::Point3f(0,0,0);
+            trans_error = 0;
+        }
 
         if(doingTrans && !rotationOnly) {
             
             if (trans_error < targetTrans) {
                 doingTrans = false;
-                targetRot = std::max(targetRot -2, minRot); 
+                targetTrans = std::max(targetTrans/2, minTrans); 
             }
             else {
                 std::stringstream ss;
@@ -349,20 +365,21 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         }
         
         else if (!doingTrans && !translationOnly) { 
+            increment_switch = 0; // reset increment switch when doing rotation
             if (rot_error < targetRot) {
                 doingTrans = true;
-                targetTrans = std::max(targetTrans/2, minTrans);
+                targetRot = std::max(targetRot/2, minRot);
             }
             else {
                 std::stringstream ss;
-            ss << rotation_rate.x << "," << rotation_rate.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-            std::string data_to_send = ss.str();
-            if (!MetadataTcpClient::SendMetadata(data_to_send)){
-                std::cout << "Could not send data \n";
-            }
+                ss << rotation_rate.x << "," << rotation_rate.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
+                std::string data_to_send = ss.str();
+                if (!MetadataTcpClient::SendMetadata(data_to_send)){
+                    std::cout << "Could not send data \n";
+                }
             }
         }
         std::cout << " Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;
-        // if ((rot_error <= 1) && (trans_error <= 10)) return true;
-        return false;
+        
+        return ((rot_error < minRot) && (trans_error < minTrans));
     }

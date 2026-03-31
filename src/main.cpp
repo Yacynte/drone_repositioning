@@ -5,6 +5,7 @@
 #include "MetadataClient.h"
 #include "RtspReader.h"
 #include "AlgoLogger.hpp"
+
 #include "Utils.h"
 #include <cmath>
 #include <sstream>
@@ -159,11 +160,15 @@ int main(int argc, char** argv) {
     // Load target image
     ImageMatcher matcher(target_image_path);
     
+    
     cv::Mat frame;
     std::vector<int> direction_history;
     int switching = 0;
     bool rotOld, transOld;
     std::vector<float> reproject;
+    double old_mean_error = 100;
+    int increment_switch = 0;
+    double mean_trans_error = 100;
     while (true) {
         // std::cout << "Status of Start/Stop flags - Start: " << client.startRepositioning.load() << ", Stop: " << client.stopRepositioning.load() << std::endl;
         if (!client.startRepositioning.load()) {
@@ -262,7 +267,7 @@ int main(int argc, char** argv) {
         // error_dist = cv::norm(displacement);
         // error_dist = abs(translation.x) + abs(translation.y) + abs(translation.z);
         // error_dist = cv::norm(cv::Point2f(displacement.z, displacement.y));
-        std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << " " << std::endl;
+        std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << ", Mean translation error: " << mean_trans_error << " " << std::endl;
         std::cout << " rotation : rotation_x: " << rotation.x << " rotation_y: " << rotation.y << " rotation_z: " << rotation.z << " " << std::endl;
         std::cout << " displacement : x: " << displacement.x << " y: " << displacement.y << " z: " << displacement.z << " " << std::endl;
         std::cout << " rotation rate: rotation rate_x: " << angle_rate_cmd.x << " rotation rate_y: " << angle_rate_cmd.y << " rotation rate_z: " << angle_rate_cmd.z << " " << std::endl;
@@ -274,17 +279,26 @@ int main(int argc, char** argv) {
 
         auto send_ts = AlgoLogger::nowWallSec();
         
-        double mean_trans_error = 10;
         if (reproject.size() == 10) {
             double sum = std::accumulate(reproject.begin(), reproject.end(), 0.0);
             mean_trans_error = sum / 10.0;
         }
+        
+        if (mean_trans_error <= old_mean_error) { 
+            increment_switch = 0; 
+        }
+        else {
+            increment_switch += 1;
+        }
+        std::cout << "Current increment switch counter: " << increment_switch << std::endl;
+        
 
-        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error)){
+        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error, translation)) {
             std::cout << "Arrived at target \n";
             break;
         }
 
+        old_mean_error = mean_trans_error;
         // if (mean_trans_error <= 7){
         //     ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
         // }

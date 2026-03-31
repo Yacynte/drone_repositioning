@@ -365,7 +365,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         // std::cout << "Prepared Matches" << std::endl;
     }
 
-    std::cout << "Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
+    std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
     // 1. Run Homography
     cv::Mat maskH;
     cv::Mat HomographyMat = cv::findHomography(inputMatches, targetMatches, cv::RANSAC, 2.0, maskH);
@@ -423,7 +423,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
                 inliers2.push_back(targetMatches[i]);
             }
         }
-        std::cout << " Before ReprojectionError " << std::endl;
+        // std::cout << " Before ReprojectionError " << std::endl;
         double meanError = getReprojectionError(inliers1, inliers2, bestR, bestT);
         std::cout << " ReprojectionError " << meanError << std::endl;
         // if (meanError < 4){
