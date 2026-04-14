@@ -76,7 +76,7 @@ public:
                 return std::nullopt;
             }
         }
-        if (vals.size() != 6) return std::nullopt;
+        if (vals.size() != 7) return std::nullopt;
 
         c.c0 = vals[0]; c.c1 = vals[1]; c.c2 = vals[2];
         c.c3 = vals[3]; c.c4 = vals[4]; c.c5 = vals[5];
@@ -92,34 +92,42 @@ public:
     // - cmd_parsed: parsed numeric command fields (optional)
     void log(double img_ts,
              double send_ts,
-             const cv::Point3f& rvec,
-             const cv::Point3f& t_px,
-             const std::string& cmd_raw = "",
+             double px_error,
+            //  const cv::Point3f& rvec,
+            //  const cv::Point3f& t_px,
+            //  const std::string& cmd_raw = "",
              const std::optional<Command6>& cmd_parsed = std::nullopt)
     {
         const double dt_ms = (send_ts - img_ts) * 1000.0;
 
         std::ostringstream line;
         line.setf(std::ios::fixed);
-        line << std::setprecision(6)
-             << img_ts << ","
-             << send_ts << ","
-             << std::setprecision(3) << dt_ms << ","
-             << std::setprecision(6)
-             << rvec.x << "," << rvec.y << "," << rvec.z << ","
-             << std::setprecision(3)
-             << t_px.x << "," << t_px.y << "," << t_px.z << ",";
+        // line << std::setprecision(6)
+        //      << img_ts << ","
+        //      << send_ts << ","
+        //      << std::setprecision(3) << dt_ms << ","
+             
+            //  << rvec.x << "," << rvec.y << "," << rvec.z << ","
+            //  << std::setprecision(3)
+            //  << t_px.x << "," << t_px.y << "," << t_px.z << ",";
 
         // command numeric fields (6 columns). If not provided, write empty
         if (cmd_parsed) {
-            line << cmd_parsed->c0 << "," << cmd_parsed->c1 << "," << cmd_parsed->c2 << ","
-                 << cmd_parsed->c3 << "," << cmd_parsed->c4 << "," << cmd_parsed->c5 << ",";
+            line << std::setprecision(6)
+             << img_ts << ","
+             << send_ts << ","
+             << std::setprecision(3) << dt_ms << ","
+             << std::setprecision(3) << px_error << ","
+             << std::setprecision(3)
+             << cmd_parsed->c0 << "," << cmd_parsed->c1 << "," << cmd_parsed->c2 << ","
+             << std::setprecision(3)
+             << cmd_parsed->c3 << "," << cmd_parsed->c4 << "," << cmd_parsed->c5 << "\n";
         } else {
-            line << ",,,,,,";
+            line << ",,,,,, \n";
         }
 
         // raw command as a quoted CSV cell (escape quotes)
-        line << quoteCsv(cmd_raw) << "\n";
+        // line << quoteCsv(cmd_raw) << "\n";
 
         writeLine(line.str());
     }
@@ -143,11 +151,9 @@ private:
     std::mutex mtx_;
 
     void writeHeader() {
-        out_ << "img_ts,send_ts,dt_ms,"
-                "rvec_x,rvec_y,rvec_z,"
-                "tx_px,ty_px,"
-                "cmd0,cmd1,cmd2,cmd3,cmd4,cmd5,"
-                "cmd_raw\n";
+        out_ << "img_ts,send_ts,dt_ms,px_error,"
+                "w_x,w_y,w_z,"
+                "v_x,v_y,v_z\n";
     }
 
     void writeLine(const std::string& s) {

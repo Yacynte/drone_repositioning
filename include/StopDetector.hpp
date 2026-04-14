@@ -25,7 +25,7 @@ struct StopDetectorConfig {
     int   k              = 4;     // finite difference stride (frames)
     int   window         = 4;    // sliding window size (in delta samples)
     int   max_crossings  = 1;     // drone overshot and recovered this many times in recent history -> call it oscillation
-    float min_magnitude  = 0.1f; // minimum delta magnitude to count (tune to your scale)
+    float min_magnitude  = 0.5f; // minimum delta magnitude to count (tune to your scale)
 };
 
 class StopDetector {
@@ -44,7 +44,8 @@ public:
             return false;
 
         // Keep buffer bounded — only retain what we need
-        if (static_cast<int>(history_.size()) > required + cfg_.k)
+        const int max_history = required + 50; // add some extra padding to avoid too-frequent erasing
+        if (static_cast<int>(history_.size()) > max_history)
             history_.erase(history_.begin());
 
         // Build recent finite differences over stride k

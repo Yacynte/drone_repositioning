@@ -322,50 +322,50 @@ int main()
 */
 
 
-bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error, cv::Point3f translation) {
+bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error, cv::Point3f translation, std::string& data_to_send) {
 
         static bool doingTrans = true;
-        static float targetRot = 10.0f;
-        static float targetTrans = 30.0f;
         static float minRot = 0.5f;
-        static float minTrans = 1.0f;
+        static float minTrans = 0.0f;
+        static float targetRot = std::min(10.0f, std::max(minRot, rot_error/2)); // start with half the initial error, but cap to 10 to avoid long waits
+        static float targetTrans = std::min(30.0f, std::max(minTrans, trans_error/2)); // start with half the initial error, but cap to 30 to avoid long waits
         static StopDetector detector;
         static int increment_switch = 0;
+        // std::string data_to_send = "";
+        // if ((rot_error < minRot) && (trans_error < minTrans)) return true;
 
-        if ((rot_error < minRot) && (trans_error < minTrans)) return true;
-
-        if (doingTrans && !rotationOnly) {
+        if (doingTrans && !rotationOnly && trans_error >= minTrans) {
             if (detector.update(translation)) { // if error has increased for 5 consecutive frames, stop movement commands to prevent oscillation
                 increment_switch += 1;
-                detector.reset(); // reset history after stopping
+                // detector.reset(); // reset history after stopping
                 std::cout << "Increment switch triggered, stopping movement commands to prevent oscillation." << std::endl;
             }
-            // else increment_switch = 0; // reset counter if not oscillating
+            else increment_switch = 0; // reset counter if not oscillating
         }
 
-        if (increment_switch >= 3) {
+        if (increment_switch > 2) {
             translation_rate = cv::Point3f(0,0,0);
             trans_error = 0;
         }
 
         if(doingTrans && !rotationOnly) {
             
-            if (trans_error < targetTrans) {
+            if (trans_error < targetTrans ) {
                 doingTrans = false;
-                targetTrans = std::max(targetTrans/2, minTrans); 
+                targetTrans = std::max(targetTrans/2, minTrans);
+                increment_switch = 0; // reset increment switch when doing rotation 
             }
             else {
                 std::stringstream ss;
                 ss << 0 << "," << 0 << "," << 0 << "," << translation_rate.x << "," << translation_rate.y << "," << translation_rate.z << "," << "0" << "\n";
-                std::string data_to_send = ss.str();
+                data_to_send = ss.str();
                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
                     std::cout << "Could not send data \n";
                 }
             }
         }
         
-        else if (!doingTrans && !translationOnly) { 
-            increment_switch = 0; // reset increment switch when doing rotation
+        else if (!doingTrans && !translationOnly ) { 
             if (rot_error < targetRot) {
                 doingTrans = true;
                 targetRot = std::max(targetRot/2, minRot);
@@ -373,13 +373,14 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
             else {
                 std::stringstream ss;
                 ss << rotation_rate.x << "," << rotation_rate.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-                std::string data_to_send = ss.str();
+                data_to_send = ss.str();
                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
                     std::cout << "Could not send data \n";
                 }
             }
         }
         std::cout << " Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;
+        std::cout << " Rotation error " << rot_error << " and translation error " << trans_error << std::endl;
         
-        return ((rot_error < minRot) && (trans_error < minTrans));
+        return ((rot_error <= minRot) && (trans_error <= minTrans));
     }

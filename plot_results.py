@@ -33,11 +33,12 @@ def load_algo_log(filepath):
     # Rename columns for consistency
     df.rename(columns={
         'img_ts': 'time',
-        'tx_px': 'pos_x',
-        'ty_px': 'pos_y',
-        'rvec_z': 'rotation_z',  # Approximate mapping
-        'rvec_x': 'rotation_x',
-        'rvec_y': 'rotation_y'
+        'v_x': 'vel_x',
+        'v_y': 'vel_y',
+        'v_z': 'vel_z',
+        'w_x': 'omega_x',
+        'w_y': 'omega_y',
+        'w_z': 'omega_z'
     }, inplace=True)
     # Note: AlgoLog doesn't have z position, so we'll skip it for algo
     return df
@@ -132,37 +133,34 @@ def plot_algo_log(algo_log, output_file='algo_log_plot.png'):
     fig.suptitle('Algorithm Results (AlgoLog)', fontsize=16, fontweight='bold')
     
     # Plot Position X
-    axes[0].plot(algo_log['time'], algo_log['pos_x'], 'g-', linewidth=2)
-    axes[0].set_ylabel('Position X (pixels)', fontsize=10)
+    axes[0].plot(algo_log['time'], algo_log['vel_x'], 'g-', linewidth=2)
+    axes[0].set_ylabel('Velocity X (cm/s)', fontsize=10)
     axes[0].grid(True, alpha=0.3)
     
     # Plot Position Y
-    axes[1].plot(algo_log['time'], algo_log['pos_y'], 'g-', linewidth=2)
-    axes[1].set_ylabel('Position Y (pixels)', fontsize=10)
+    axes[1].plot(algo_log['time'], algo_log['vel_y'], 'g-', linewidth=2)
+    axes[1].set_ylabel('Velocity Y (cm/s)', fontsize=10)
     axes[1].grid(True, alpha=0.3)
-    
-    # Plot Rotation X
-    axes[2].plot(algo_log['time'], algo_log['rotation_x'], 'g-', linewidth=2)
-    axes[2].set_ylabel('Rotation X (rad)', fontsize=10)
+
+
+    # Plot Position Z
+    axes[2].plot(algo_log['time'], algo_log['vel_z'], 'g-', linewidth=2)
+    axes[2].set_ylabel('Velocity Z (cm/s)', fontsize=10)
     axes[2].grid(True, alpha=0.3)
     
-    # Plot Rotation Y
-    axes[3].plot(algo_log['time'], algo_log['rotation_y'], 'g-', linewidth=2)
-    axes[3].set_ylabel('Rotation Y (rad)', fontsize=10)
+    # Plot Rotation X
+    axes[3].plot(algo_log['time'], algo_log['omega_x'], 'g-', linewidth=2)
+    axes[3].set_ylabel('Angular Velocity X (rad/s)', fontsize=10)
     axes[3].grid(True, alpha=0.3)
     
-    # Plot Rotation Z
-    axes[4].plot(algo_log['time'], algo_log['rotation_z'], 'g-', linewidth=2)
-    axes[4].set_ylabel('Rotation Z (rad)', fontsize=10)
+    # Plot Rotation Y
+    axes[4].plot(algo_log['time'], algo_log['omega_y'], 'g-', linewidth=2)
+    axes[4].set_ylabel('Angular Velocity Y (rad/s)', fontsize=10)
     axes[4].grid(True, alpha=0.3)
     
-    # Plot Commands combined (cmd0, cmd1, cmd2)
-    axes[5].plot(algo_log['time'], algo_log['cmd0'], label='cmd0', linewidth=2)
-    axes[5].plot(algo_log['time'], algo_log['cmd1'], label='cmd1', linewidth=2)
-    axes[5].plot(algo_log['time'], algo_log['cmd2'], label='cmd2', linewidth=2)
-    axes[5].set_ylabel('Commands', fontsize=10)
-    axes[5].set_xlabel('Time (seconds)', fontsize=10)
-    axes[5].legend(loc='best')
+    # Plot Rotation Z
+    axes[5].plot(algo_log['time'], algo_log['omega_z'], 'g-', linewidth=2)
+    axes[5].set_ylabel('Angular Velocity Z (rad/s)', fontsize=10)
     axes[5].grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -203,7 +201,7 @@ def main():
             print(f"Loading Unreal Engine path (rates): {motion_log_2_path.name}")
     
     # Get AlgoLog (algorithm results)
-    algo_logs = list(repo_root.glob('logs/AlgoLog_*.csv'))
+    algo_logs = list(repo_root.glob('logs_cmd/AlgoLog_*.csv'))
     if not algo_logs:
         print("❌ No AlgoLog files found in build/")
         return

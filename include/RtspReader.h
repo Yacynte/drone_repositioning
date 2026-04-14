@@ -17,7 +17,7 @@ public:
 
 private:
     void readerLoop();
-
+    bool isImageDark(const cv::Mat& image, double threshold = 30.0);
     std::string cmd_;
     int width_, height_;
     int frameSize_;

@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
         cv::Point3f angle = cv::Point3f (axis.at<float>(0),
                                          axis.at<float>(1),
                                          axis.at<float>(2));
-        cv::Point3f rotation, translation, displacement;
+        cv::Point3f rotation, translation;
 
         if (unreal_test){
             // rotation.x = axis.at<double>(2) * angle;
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
 
             translation = ConvertCVToUE(direction1);
             // displacement = ConvertCVToUE(displacement_);
-            displacement = ConvertCVToUE(direction1);
+            // displacement = ConvertCVToUE(direction1);
             rotation = ConvertCVToUERot(rotation_vec);
             // rotation = ConvertCVToUERot(rotVec);
         }
@@ -239,44 +239,33 @@ int main(int argc, char** argv) {
             rotation.x = axis.at<double>(0);
             rotation.y = axis.at<double>(1);
             rotation.z = axis.at<double>(2);
-            translation = displacement;
+            translation = direction1;
         }   
 
         angle_rate_cmd = w_max * activation(rotation, k=0.1f);
         // angle_rate_cmd.z = 0;
         cmd_vx = v_max * activation(translation, k=0.2);
-        if (displacement.x == 0) cmd_vx.x == 0;
+        if (translation.x == 0) cmd_vx.x == 0;
         
         int mean_previous_direction = (direction_history.empty() || direction_history.size() < 8) ? -2 : std::round(std::accumulate(direction_history.begin(), direction_history.end(), 0.0) / direction_history.size());
         // int current_direction = (displacement.x >= 0) ? 1 : -1;
         if (mean_previous_direction == 0) cmd_vx.x = 0; // if historically around target, stop sending x velocity to avoid oscillation
-        // yaw/pitch rate from angular error (separate gains!)
-        // angle_rate_cmd.x = yaw_rate_max * std::tanh(k_yaw   * rotation.x);
-        // angle_rate_cmd.y = pitch_rate_max * std::tanh(k_pitch * rotation.y);
-
-        // if (old_img_ts != 0) dt = img_ts - old_img_ts;
-        // dt-based smoothing
-        // float alpha = 1.f - std::exp(- k_yaw * angle);
+ 
         float alpha = 0.5; // fixed smoothing factor (tune this)
 
         cmd_vx = alpha * cmd_vx + (1 - alpha) * last_cmd_vx;
         // std::cout << "Smoothed cmd_vx: " << cmd_vx << std::endl;
         std::cout << " rotation rate without correction: rate_x: " << angle_rate_cmd.x << " rate_y: " << angle_rate_cmd.y << "  rate_z: " << angle_rate_cmd.z << " " << std::endl;
         angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
-        // error_ang = cv::norm(diff);
-        // error_dist = cv::norm(displacement);
-        // error_dist = abs(translation.x) + abs(translation.y) + abs(translation.z);
-        // error_dist = cv::norm(cv::Point2f(displacement.z, displacement.y));
-        std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << ", Mean translation error: " << mean_trans_error << " " << std::endl;
-        std::cout << " rotation : rotation_x: " << rotation.x << " rotation_y: " << rotation.y << " rotation_z: " << rotation.z << " " << std::endl;
-        std::cout << " displacement : x: " << displacement.x << " y: " << displacement.y << " z: " << displacement.z << " " << std::endl;
-        std::cout << " rotation rate: rotation rate_x: " << angle_rate_cmd.x << " rotation rate_y: " << angle_rate_cmd.y << " rotation rate_z: " << angle_rate_cmd.z << " " << std::endl;
-        std::cout << " direction rate: direction_x: " << translation.x << " direction rate_y: " << translation.y << " direction_z: " << translation.z << " " << std::endl;
+
+        // std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << ", Mean translation error: " << mean_trans_error << " " << std::endl;
+        // std::cout << " rotation : rotation_x: " << rotation.x << " rotation_y: " << rotation.y << " rotation_z: " << rotation.z << " " << std::endl;
+        // std::cout << " displacement : x: " << displacement.x << " y: " << displacement.y << " z: " << displacement.z << " " << std::endl;
+        // std::cout << " rotation rate: rotation rate_x: " << angle_rate_cmd.x << " rotation rate_y: " << angle_rate_cmd.y << " rotation rate_z: " << angle_rate_cmd.z << " " << std::endl;
+        // std::cout << " direction rate: direction_x: " << translation.x << " direction rate_y: " << translation.y << " direction_z: " << translation.z << " " << std::endl;
         
         std::stringstream ss; 
         
-        // double send_ts = 0;
-
         auto send_ts = AlgoLogger::nowWallSec();
         
         if (reproject.size() == 10) {
@@ -292,133 +281,30 @@ int main(int argc, char** argv) {
         }
         std::cout << "Current increment switch counter: " << increment_switch << std::endl;
         
-
-        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error, translation)) {
+        std::string data_to_send = "";
+        if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error, translation, data_to_send)) {
             std::cout << "Arrived at target \n";
-            break;
+            complete = true;
         }
 
         old_mean_error = mean_trans_error;
-        // if (mean_trans_error <= 7){
-        //     ss << angle_rate_cmd.x << "," << angle_rate_cmd.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-        // }
-        // else {
-        //     ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "," << "1" << "\n";
-        // }
-        // data_to_send = ss.str();
-        // if (!client.SendMetadata(data_to_send)) std::cerr << "Failed to send data. Check connection." << std::endl;
-        // if ((rot_error < 1) && (mean_trans_error < 7 )) return true;
-        
-        // if (!client.translationOnly && !hasNaN(angle_rate_cmd) && !complete_rot){ // (cv::norm(displacement) < 2)){
-        //     std::cout << "In if.... \n";
-        //     if ((std::abs(rotation.x) > 1) || (std::abs(rotation.y) > 1)){
-        //         std::cout << " rot greater than 0.2 \n";
-        //         float a = 0, b = 0, c = 0;
-        //         if (std::abs(rotation.x) > 1) a = angle_rate_cmd.x;
-        //         if (std::abs(rotation.y) > 1) b = angle_rate_cmd.y;
-        //         ss << a << "," << b << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-        //         data_to_send = ss.str();
-        //         if (!client.SendMetadata(data_to_send)) 
-        //         {
-        //             std::cerr << "Failed to send data. Check connection." << std::endl;
-        //             break;
-        //         }
-        //         send_ts = AlgoLogger::nowWallSec();
-                
-        //         last_frame_init = AlgoLogger::nowWallSec();
-        //     }
-        //     else { complete_rot = true; }
-        //     last_frame = AlgoLogger::nowWallSec();
-            
-        // }
-
-
-        // else if (!client.rotationOnly && !hasNaN(cmd_vx) && !hasNaN(angle_rate_cmd) && !complete_trans){
-        //     // if ((std::abs(displacement.x) < 0.2) || (std::abs(displacement.y) > 2) || (std::abs(displacement.z) > 2)){
-        //     if (cv::norm(displacement) > 2){
-        //         float a = 0, b = 0, c = 0, d = 0;
-        //         if (std::abs(displacement.x) != 0) a = cmd_vx.x;
-        //         if (std::abs(displacement.y) > 1) b = cmd_vx.y;
-        //         if (std::abs(displacement.z) > 1) c = cmd_vx.z;
-        //         // if (std::abs(angle_rate_cmd.y) > 2) d = angle_rate_cmd.y;
-        //         ss << 0 << "," << d << "," << 0 << "," << a << "," << b << "," << c << "," << "1" << "\n";
-        //         data_to_send = ss.str();
-        //         // }
-        //         // ss << 0 << "," << 0 << "," << 0 << "," << cmd_vx.x << "," << cmd_vx.y << "," << cmd_vx.z << "," << "0" << "\n";
-        //         // data_to_send = ss.str();
-        //         if (!client.SendMetadata(data_to_send)) 
-        //         {
-        //             std::cerr << "Failed to send data. Check connection." << std::endl;
-        //             break;
-        //         }
-        //         send_ts = AlgoLogger::nowWallSec();
-        //         // std::cout << "Data sent: " << data_to_send << std::endl;
-        //         // increment = 0;
-        //         // last_frame = img_ts;
-        //         // data_to_send = "";
-                
-        //         last_frame_init = AlgoLogger::nowWallSec();
-        //     }
-        //     else { complete_trans = true; }
-        //     last_frame = AlgoLogger::nowWallSec();
-        //     // complete_trans = true;
-        // }
-        
+               
       
         // optional parse (so you can graph cmd5 easily)
         auto parsed = AlgoLogger::parseCommand6(data_to_send);
-        logger.log(img_ts, send_ts, angle_rate_cmd, cmd_vx, data_to_send, parsed);
+        logger.log(img_ts, send_ts, mean_trans_error, parsed);
         time_now = AlgoLogger::nowWallSec();
-        if (complete_rot && complete_trans) break;
-        // std::cout << "Last time - last_frame_init: " << last_frame - last_frame_init <<std::endl;
-        // if(last_frame - last_frame_init >= 2) {
-        //     // std::cout << "Arrived at destination" << std::endl;
-        //     // break;
-        //     if (client.rotationOnly) std::cout << "Rotation Complete \n";
-        //     else if (client.translationOnly)  std::cout << "Translation Complete \n";
-        //     complete = true;
-        //     if (rotOld != client.rotationOnly || transOld != client.translationOnly) 
-        //         complete = false;
-        //         last_frame_init = AlgoLogger::nowWallSec() + 30;
 
-        // }
-        // rotOld = client.rotationOnly;
-        // transOld = client.translationOnly;
+        // if (complete_rot && complete_trans) break;
+
         last_cmd_vx = cmd_vx;
         last_angle_rate = angle_rate_cmd;
-        direction_history.push_back((displacement.x >= 0) ? 1 : -1);
+        direction_history.push_back((translation.x >= 0) ? 1 : -1);
         if (direction_history.size() > 10) direction_history.erase(direction_history.begin());
-        if (client.stopRepositioning.load()) {
-            std::cout << "Received command to stop repositioning" << std::endl;
+        if (client.stopRepositioning.load() || complete) {
+            std::cout << "Received command to stop repositioning or arrived at target" << std::endl;
             break;
         }
-        // old_img_ts = img_ts;
-        // std::cout << "Metadata sent: rotation_z=" << rotation.z << ", rotation_y=" << rotation.y << std::endl;
-        // // Choose color based on z motion
-        // cv::Scalar color = (direction.z < 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
-
-        // // Draw arrow for x/y direction
-        // cv::Point center(frame.cols / 2, frame.rows / 2);
-        // cv::Point tip(
-        //     static_cast<int>(center.x + displacement*direction.x ), // scale factor for visibility
-        //     static_cast<int>(center.y + displacement*direction.y )
-        // );
-
-        // cv::arrowedLine(frame, center, tip, color, 2, cv::LINE_AA, 0, 0.3);
-
-        // // Display info text
-        // std::string text = "dx=" + std::to_string(cmd_vx.x) +
-        //                    " dy=" + std::to_string(cmd_vx.y) +
-        //                    " dz=" + std::to_string(cmd_vx.z);
-        // cv::putText(frame, text, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
-
-        
-        // // Show live feed
-        // cv::imshow("Live Camera Alignment", frame);
-        // if (cv::waitKey(1) == 'q') break;
-
-        // // std::cout << "Show Image. "<< std::endl;
-        // // std::cout<< "Direction: " << direction << std::endl;
 
     }
     reader.stop();
