@@ -216,28 +216,33 @@ void MetadataTcpClient::receiveCommand() {
             if (cmd == "start_repositioning" || cmd == "start") {
                 startRepositioning.store(true);
                 stopRepositioning.store(false); // reset stop flag
-                // std::cout << "Received command to start repositioning" << std::endl;
+                std::cout << "Received command to start repositioning" << std::endl;
             } else if (cmd == "stop_repositioning" || cmd == "stop") {
                 stopRepositioning.store(true);
-                startRepositioning.store(false); // reset start flag
-                // std::cout << "Received command to stop repositioning" << std::endl;
+                // startRepositioning.store(false); // reset start flag
+                std::cout << "Received command to stop repositioning" << std::endl;
             } else if (cmd == "pause_repositioning" || cmd == "pause") {
                 pauseRepositioning.store(true);
                 resumeRepositioning.store(false); // reset resume flag
+                std::cout << "Received command to pause repositioning" << std::endl;
             } else if (cmd == "resume_repositioning" || cmd == "resume") {
                 resumeRepositioning.store(true);
                 pauseRepositioning.store(false); // reset pause flag
+                std::cout << "Received command to resume repositioning" << std::endl;
             } else if (cmd == "rotation_only") {
                 rotationOnly.store(true);
                 translationOnly.store(false); // reset translation-only flag
+                std::cout << "Received command to switch to rotation-only mode" << std::endl;
                 // stopTranslation.store(true); // stop translation if switching to rotation-only
             } else if (cmd == "resume_both") {
                 rotationOnly.store(false);
                 translationOnly.store(false); // reset translation-only flag
+                std::cout << "Received command to resume both rotation and translation" << std::endl;
                 // stopTranslation.store(true); // stop translation if switching to rotation-only
             } else if (cmd == "translation_only") {
                 translationOnly.store(true);
                 rotationOnly.store(false); // reset rotation-only flag
+                std::cout << "Received command to switch to translation-only mode" << std::endl;
                 // stopRotation.store(true); // stop rotation if switching to translation-only
             } else {
                 std::cerr << "Unknown command: '" << cmd << "'\n";
@@ -324,7 +329,7 @@ int main()
 
 bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error, cv::Point3f translation, std::string& data_to_send) {
 
-        static bool doingTrans = true;
+        static bool doingTrans = rotationOnly ? false : true; // if starting in rotation-only mode, start with rotation; otherwise start with translation
         static float minRot = 0.5f;
         static float minTrans = 0.0f;
         static float targetRot = std::min(10.0f, std::max(minRot, rot_error/2)); // start with half the initial error, but cap to 10 to avoid long waits
@@ -351,7 +356,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         if(doingTrans && !rotationOnly) {
             
             if (trans_error < targetTrans ) {
-                doingTrans = false;
+                doingTrans = translationOnly ? true : false; // if in translation-only mode, stay in translation; otherwise switch to rotation
                 targetTrans = std::max(targetTrans/2, minTrans);
                 increment_switch = 0; // reset increment switch when doing rotation 
             }
@@ -367,7 +372,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         
         else if (!doingTrans && !translationOnly ) { 
             if (rot_error < targetRot) {
-                doingTrans = true;
+                doingTrans = rotationOnly ? false : true; // if in rotation-only mode, stay in rotation; otherwise switch to translation
                 targetRot = std::max(targetRot/2, minRot);
             }
             else {
@@ -379,8 +384,8 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
                 }
             }
         }
-        std::cout << " Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;
-        std::cout << " Rotation error " << rot_error << " and translation error " << trans_error << std::endl;
+        // std::cout << " Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;
+        std::cout << "Rotation error " << rot_error << " and translation error " << trans_error << std::endl;
         
         return ((rot_error <= minRot) && (trans_error <= minTrans));
     }

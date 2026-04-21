@@ -106,7 +106,7 @@ bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
         cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
 
     cv::Scalar meanVal = cv::mean(gray);
-    std::cout << "image mean brightness: " << meanVal[0] << std::endl;
+    // std::cout << "image mean brightness: " << meanVal[0] << std::endl;
 
     return meanVal[0] < threshold;
 }

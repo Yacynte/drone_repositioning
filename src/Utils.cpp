@@ -51,6 +51,15 @@ cv::Point3f ConvertCVToUERot(const cv::Point3f& r)
     );
 }
 
+cv::Point3f ConvertCVToDrone(const cv::Point3f& r)
+{
+    return cv::Point3f(
+        0,    // Unreal roll  ← OpenCV pitch (negate: Y points down in CV, up in UE)
+        0,    // Unreal pitch ← OpenCV yaw   (negate: Z forward flips handedness)
+        r.x     // Unreal yaw   ← OpenCV roll   (same axis)
+    );
+}
+
 double wrapDeg(double a)
 {
     a = std::fmod(a + 180.0, 360.0);

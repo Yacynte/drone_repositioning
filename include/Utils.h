@@ -24,6 +24,8 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p);
 
 cv::Point3f ConvertCVToUERot(const cv::Point3f& r);
 
+cv::Point3f ConvertCVToDrone(const cv::Point3f& r);
+
 double wrapDeg(double a);
 
 double tanhRate(double errDeg, double maxRateDegS, double k);

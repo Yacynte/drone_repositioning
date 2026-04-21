@@ -169,9 +169,14 @@ int main(int argc, char** argv) {
     double old_mean_error = 100;
     int increment_switch = 0;
     double mean_trans_error = 100;
+    bool has_started = false;
     while (true) {
+        if (client.stopRepositioning.load() || complete) {
+            std::cout << "Received command to stop repositioning or arrived at target" << std::endl;
+            break;
+        }
         // std::cout << "Status of Start/Stop flags - Start: " << client.startRepositioning.load() << ", Stop: " << client.stopRepositioning.load() << std::endl;
-        if (!client.startRepositioning.load()) {
+        if (!client.startRepositioning.load() && !has_started) {
             // std::cout << "Received command to start the Repositioning System" << std::endl;
             std::cout << "Waiting to start the Repositioning System" << std::endl;
             usleep(1000 * 1000); // Sleep for 1 second before checking again
@@ -184,8 +189,9 @@ int main(int argc, char** argv) {
             }
             std::cout << "Resuming repositioning" << std::endl;
         }
+        has_started = true;
         // cap >> frame;
-        if (!reader.getFrame(frame)) {
+        if (!reader.getFrame(frame) ) {
             // std::cout << "No available frame" << std::endl;
             continue;}
         // When image arrives:
@@ -236,9 +242,7 @@ int main(int argc, char** argv) {
             // rotation = ConvertCVToUERot(rotVec);
         }
         else{
-            rotation.x = axis.at<double>(0);
-            rotation.y = axis.at<double>(1);
-            rotation.z = axis.at<double>(2);
+            rotation = ConvertCVToDrone(rotation_vec); // in degrees
             translation = direction1;
         }   
 
@@ -255,7 +259,7 @@ int main(int argc, char** argv) {
 
         cmd_vx = alpha * cmd_vx + (1 - alpha) * last_cmd_vx;
         // std::cout << "Smoothed cmd_vx: " << cmd_vx << std::endl;
-        std::cout << " rotation rate without correction: rate_x: " << angle_rate_cmd.x << " rate_y: " << angle_rate_cmd.y << "  rate_z: " << angle_rate_cmd.z << " " << std::endl;
+        // std::cout << " rotation rate without correction: rate_x: " << angle_rate_cmd.x << " rate_y: " << angle_rate_cmd.y << "  rate_z: " << angle_rate_cmd.z << " " << std::endl;
         angle_rate_cmd = alpha * angle_rate_cmd + (1 - alpha) * last_angle_rate;
 
         // std::cout << "Error angle: " << rot_error << ", Error distance: " << trans_error << ", Mean translation error: " << mean_trans_error << " " << std::endl;
@@ -279,7 +283,7 @@ int main(int argc, char** argv) {
         else {
             increment_switch += 1;
         }
-        std::cout << "Current increment switch counter: " << increment_switch << std::endl;
+        // std::cout << "Current increment switch counter: " << increment_switch << std::endl;
         
         std::string data_to_send = "";
         if ( client.respositionFunc(angle_rate_cmd, cmd_vx, rot_error, mean_trans_error, translation, data_to_send)) {
@@ -301,10 +305,7 @@ int main(int argc, char** argv) {
         last_angle_rate = angle_rate_cmd;
         direction_history.push_back((translation.x >= 0) ? 1 : -1);
         if (direction_history.size() > 10) direction_history.erase(direction_history.begin());
-        if (client.stopRepositioning.load() || complete) {
-            std::cout << "Received command to stop repositioning or arrived at target" << std::endl;
-            break;
-        }
+        
 
     }
     reader.stop();

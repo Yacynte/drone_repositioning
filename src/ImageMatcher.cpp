@@ -280,7 +280,7 @@ std::vector<cv::DMatch> ImageMatcher::gridFilterMatches(const std::vector<cv::DM
     float cellW = width  / gridCols;
     float cellH = height / gridRows;
 
-    std::cout<< "width: "<< width << " height: " << height <<std::endl;
+    // std::cout<< "width: "<< width << " height: " << height <<std::endl;
     // grid of matches per cell
     std::vector<std::vector<cv::DMatch>> grid(gridCols * gridRows);
 
@@ -365,17 +365,17 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         // std::cout << "Prepared Matches" << std::endl;
     }
 
-    std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
+    // std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
     // 1. Run Homography
     cv::Mat maskH;
     cv::Mat HomographyMat = cv::findHomography(inputMatches, targetMatches, cv::RANSAC, 2.0, maskH);
     float ratioH = (float)cv::countNonZero(maskH) / inputMatches.size();
-    std::cout << " Homography ratio " << ratioH << std::endl;
+    // std::cout << " Homography ratio " << ratioH << std::endl;
     // 2. Run Essential
     cv::Mat maskE;
     cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, maskE);
     float ratioE = (float)cv::countNonZero(maskE) / inputMatches.size();
-    std::cout << " Essential ratio " << ratioE << std::endl;
+    // std::cout << " Essential ratio " << ratioE << std::endl;
 
     cv::Mat rotationMatrix = cv::Mat::eye(3, 3, CV_32F);
     cv::Point3f world_direction = cv::Point3f(0,0,0);
@@ -385,7 +385,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         // Use the Homography-to-Rotation math.
         std::vector<cv::Mat> Rs, ts, normals;
         int nSolutions = cv::decomposeHomographyMat(HomographyMat, cameraMatrix, Rs, ts, normals);
-        std::cout << " Homography nSolutions " << nSolutions << std::endl;
+        // std::cout << " Homography nSolutions " << nSolutions << std::endl;
         // Filter to physically valid solutions
         // Need inlier points only for filtering
         std::vector<cv::Point2f> inlierInput, inlierTarget;
@@ -395,7 +395,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
                 inlierTarget.push_back(targetMatches[i]);
             }
         }
-        std::cout << " Homography nMatches " << inlierInput.size() << std::endl;
+        // std::cout << " Homography nMatches " << inlierInput.size() << std::endl;
         // Filter using visible points
         std::vector<int> validSolutions;
         cv::filterHomographyDecompByVisibleRefpoints(
@@ -413,9 +413,9 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         cv::Mat bestR, bestT, inliersE;
         // This is General Motion (even if it's a flat scene).
         // Use recoverPose.
-        std::cout << " in RecoverPose " << std::endl;
+        // std::cout << " in RecoverPose " << std::endl;
         int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, bestR, bestT, inliersE);
-        std::cout << " Recoverpose inliers " << inlierCount << std::endl;
+        // std::cout << " Recoverpose inliers " << inlierCount << std::endl;
         std::vector<cv::Point2f> inliers1, inliers2;
         for(int i = 0; i < inliersE.rows; i++) {
             if(inliersE.at<uchar>(i)) {
@@ -425,7 +425,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         }
         // std::cout << " Before ReprojectionError " << std::endl;
         double meanError = getReprojectionError(inliers1, inliers2, bestR, bestT);
-        std::cout << " ReprojectionError " << meanError << std::endl;
+        // std::cout << " ReprojectionError " << meanError << std::endl;
         // if (meanError < 4){
         //     rotationMatrix = bestR;
         //     world_direction = cv::Point3f( bestT.at<double>(0,0), bestT.at<double>(1,0), bestT.at<double>(2,0));
@@ -453,7 +453,7 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
 
         if (avg_disp < 2.0 && var < 1.5) world_direction = cv::Point3f(0,0,0); // or keep previous
         else world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
-        std::cout << "Rotation and translation " << std::endl;
+        // std::cout << "Rotation and translation " << std::endl;
     }
     std::vector<cv::Point2f>().swap(inputMatches);
     std::vector<cv::Point2f>().swap(targetMatches);
