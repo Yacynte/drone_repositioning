@@ -21,7 +21,11 @@ RtspReader::~RtspReader() {
 
 void RtspReader::start(cv::VideoCapture* externalCap) {
     if(!unreal_test_){
-        if(externalCap != nullptr) cap = externalCap;
+        if(externalCap != nullptr) {    
+            cap = externalCap;
+            running_ = true;
+            thread_ = std::thread(&RtspReader::DroneReaderLoop, this);
+        }
         else{
             std::cerr << "Error video capture is null" << std::endl;
         }
@@ -46,20 +50,26 @@ void RtspReader::stop() {
             }
             if (thread_.joinable()) thread_.join();
     }
-    else cap = nullptr;
+    else {
+        if (cap != nullptr && cap->isOpened()) {
+            running_ = false;
+            cap->release();
+            if (thread_.joinable()) thread_.join();
+        }
+    }
 }
 
 bool RtspReader::getFrame(cv::Mat& out) {
-    if (!unreal_test_) {
-        if (cap == nullptr || !cap->isOpened()) { // guard
-            std::cerr << "Capture is null or not opened\n";
-            return false;
-        }
-        std::cout << "Reading image from drone \n";
-        bool success = cap->read(out);
-        if (!success || out.empty()) return false;
-        return !isImageDark(out);
-    }
+    // if (!unreal_test_) {
+    //     if (cap == nullptr || !cap->isOpened()) { // guard
+    //         std::cerr << "Capture is null or not opened\n";
+    //         return false;
+    //     }
+    //     std::cout << "Reading image from drone \n";
+    //     bool success = cap->read(out);
+    //     if (!success || out.empty()) return false;
+    //     return !isImageDark(out);
+    // }
     std::lock_guard<std::mutex> lock(frameMutex_);
     if (lastFrame_.empty()) return false;
     out = lastFrame_.clone();
@@ -109,4 +119,20 @@ bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
     // std::cout << "image mean brightness: " << meanVal[0] << std::endl;
 
     return meanVal[0] < threshold;
+}
+
+void RtspReader::DroneReaderLoop(){
+    while (running_){
+        cv::Mat frame;
+        if (cap != nullptr && cap->isOpened()){
+            bool success = cap->read(frame);
+            if (!success || frame.empty()) continue;
+
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                frame.copyTo(lastFrame_);
+            }
+        }
+    }
+
 }

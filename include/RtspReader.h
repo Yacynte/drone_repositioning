@@ -17,6 +17,7 @@ public:
 
 private:
     void readerLoop();
+    void DroneReaderLoop();
     bool isImageDark(const cv::Mat& image, double threshold = 30.0);
     std::string cmd_;
     int width_, height_;
@@ -27,8 +28,10 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
 
+
     std::mutex frameMutex_;
     cv::Mat lastFrame_;
+    // cv::Mat DroneLastFrame_;
 
     FILE* pipe_{nullptr};
 };

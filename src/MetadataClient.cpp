@@ -377,7 +377,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
             }
             else {
                 std::stringstream ss;
-                ss << rotation_rate.x << "," << rotation_rate.y << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
+                ss << rotation_rate.x << "," << rotation_rate.y << "," << rotation_rate.z << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
                 data_to_send = ss.str();
                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
                     std::cout << "Could not send data \n";
