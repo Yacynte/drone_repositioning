@@ -113,7 +113,7 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath) {
 
     // Initialize SIFT detector and BFMatcher
     // sift = cv::SIFT::create();
-    sift = cv::SIFT::create(2500,    // nfeatures    — default 0 (unlimited, but keeps best), set explicitly
+    sift = cv::SIFT::create(5000,    // nfeatures    — default 0 (unlimited, but keeps best), set explicitly
                             3,       // nOctaveLayers — default 3, increase for more features
                             0.05,    // contrastThreshold — default 0.04, LOWER = more features
                             10,      // edgeThreshold — default 10, HIGHER = more features  
@@ -330,8 +330,6 @@ void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT )
 
 std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::Mat& inputImage){
     if (!inputImage.empty()){
-        static int loopnr = 0;
-        need_sift_refresh = (loopnr == 0) ||((inputMatches.size() < 0.75*matches_length) || (loopnr % 1 == 0));
         cv::Mat inputGray;
         cv::cvtColor(inputImage, inputImageGray, cv::COLOR_BGR2GRAY);
         // std::cout << "Converted to Gray" << std::endl;
@@ -339,95 +337,50 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         cv::Mat inputDescriptors;
         // detectAndComputegrid(inputImageGray, inputKeypoints, inputDescriptors);
         // std::cout << "Computed Keypoints and Descriptors" << std::endl;
-        if (need_sift_refresh){
-            cv::Mat inputDesc;
-            detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
-            inputDesc.convertTo(inputDescriptors,   CV_32F);
-            inputDesc.release();
-            std::vector<cv::DMatch> goodMatches;
-            // goodMatches = goodMatcher(inputDescriptors);
-            auto matches = goodMatcher(inputDescriptors);
-            goodMatches = gridFilterMatches(matches, inputKeypoints);
+        cv::Mat inputDesc;
+        detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
+        inputDesc.convertTo(inputDescriptors,   CV_32F);
+        std::vector<cv::DMatch> goodMatches;
+        // goodMatches = goodMatcher(inputDescriptors);
+        auto matches = goodMatcher(inputDescriptors);
+        goodMatches = gridFilterMatches(matches, inputKeypoints);
 
-            // std::cout << "Matched Descriptors" << std::endl;
-            if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0)};
-            for (const auto& m : goodMatches) {
-                const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
-                const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
+        // std::cout << "Matched Descriptors" << std::endl;
+        if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0)};
+        for (const auto& m : goodMatches) {
+            const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
+            const cv::KeyPoint& kpTarget = targetKeypoints[m.trainIdx];
 
-                inputMatches.push_back(kpInput.pt);
-                targetMatches.push_back(kpTarget.pt);
-                oldMatches.target_indices.push_back(m.trainIdx);
-            }
-            oldMatches.prev_pts = inputMatches;
-            matches_length = targetMatches.size();
-            
-
-            // Setup termination criteria (Max 30 iterations or 0.01 epsilon)
-            // cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01);
-
-            // // Refine the points
-            // // winSize is the search window (5x5 or 11x11 is standard)   
-            // cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-            // cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-            // std::cout << "Prepared Matches" << std::endl;
+            inputMatches.push_back(kpInput.pt);
+            targetMatches.push_back(kpTarget.pt);
         }
-        else{
-            std::vector<uchar> status;
-            std::vector<float> err;
-            cv::calcOpticalFlowPyrLK(oldImageGray, inputImageGray, oldMatches.prev_pts, inputMatches, status, err, cv::Size(21, 21), 3);
-            
-            // Filter tracking results while preserving target image mapping
-            std::vector<cv::Point2f> tracked_pts;
-            std::vector<int> tracked_target_indices;
 
-            for (size_t i = 0; i < status.size(); i++) {
-                if (status[i] == 1) {
-                    tracked_pts.push_back(inputMatches[i]);
-                    tracked_target_indices.push_back(oldMatches.target_indices[i]);
-                }
-            }
+        // Setup termination criteria (Max 30 iterations or 0.01 epsilon)
+        cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01);
 
-            // Update state for next frame
-            oldMatches.prev_pts = tracked_pts;
-            oldMatches.target_indices = tracked_target_indices;
-            inputMatches = tracked_pts;
-
-            size_t write_idx = 0;
-            for (int src_idx : tracked_target_indices) {
-                // Safety check (optional but highly recommended)
-                if (src_idx >= 0 && src_idx < static_cast<int>(targetMatches.size())) {
-                    // Move the kept point to the front of the vector
-                    targetMatches[write_idx] = targetMatches[src_idx];
-                    write_idx++;
-                }
-            }
-
-            // Shrink the vector down to the actual tracked size.
-            // This updates the internal .size() of the vector instantly (O(1)) 
-            // without reallocating or freeing the underlying capacity heap memory.
-            targetMatches.resize(write_idx);
-
-        }
+        // Refine the points
+        // winSize is the search window (5x5 or 11x11 is standard)
+        cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+        cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+        // std::cout << "Prepared Matches" << std::endl;
     }
 
-    std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
+    // std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
     // 1. Run Homography
     cv::Mat maskH;
     cv::Mat HomographyMat = cv::findHomography(inputMatches, targetMatches, cv::RANSAC, 2.0, maskH);
     float ratioH = (float)cv::countNonZero(maskH) / inputMatches.size();
-    std::cout << " Homography ratio " << ratioH << std::endl;
+    // std::cout << " Homography ratio " << ratioH << std::endl;
     // 2. Run Essential
     cv::Mat maskE;
     cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, maskE);
     float ratioE = (float)cv::countNonZero(maskE) / inputMatches.size();
-    std::cout << " Essential ratio " << ratioE << std::endl;
+    // std::cout << " Essential ratio " << ratioE << std::endl;
 
     cv::Mat rotationMatrix = cv::Mat::eye(3, 3, CV_32F);
     cv::Point3f world_direction = cv::Point3f(0,0,0);
     // 3. The Logic
-    if (ratioH > 0.40){ // && ratioE < 0.90) {
-    // if (false){
+    if (ratioH > 0.98 && ratioE < 0.90) {
         // This is almost certainly Pure Rotation.
         // Use the Homography-to-Rotation math.
         std::vector<cv::Mat> Rs, ts, normals;
@@ -477,35 +430,33 @@ std::tuple<cv::Mat, cv::Point3f> ImageMatcher::getAlignmentDirection( const cv::
         //     rotationMatrix = bestR;
         //     world_direction = cv::Point3f( bestT.at<double>(0,0), bestT.at<double>(1,0), bestT.at<double>(2,0));
         // }
-        rotationMatrix = bestR;
+        // rotationMatrix = bestR;
         cv::Mat t_inv;
-        // cv::transpose(bestR, rotationMatrix);
+        cv::transpose(bestR, rotationMatrix);
         // t_inv = -rotationMatrix * bestT;
         // rotationMatrix = bestR;
         t_inv = -bestT;
         t_inv *= meanError ; // scale translation
 
-        std::vector<float> flows;
-        float avg_disp = 0;
+        std::vector<double> flows;
+        double avg_disp = 0;
         for (size_t i = 0; i < inputMatches.size(); i++) {
-            float d = cv::norm(inputMatches[i] - targetMatches[i]);
-            avg_disp += d;
+            avg_disp += cv::norm(inputMatches[i] - targetMatches[i]);
+            double d = cv::norm(inputMatches[i] - targetMatches[i]);
             flows.push_back(d);
         }
         avg_disp /= inputMatches.size();
 
-        float var = 0;
-        for (float f : flows) var += (f - avg_disp) * (f - avg_disp);
+        double var = 0;
+        for (double f : flows) var += (f - avg_disp) * (f - avg_disp);
         var /= flows.size();
 
         if (avg_disp < 2.0 && var < 1.5) world_direction = cv::Point3f(0,0,0); // or keep previous
-        else world_direction = cv::Point3f( t_inv.at<float>(0,0), t_inv.at<float>(1,0), t_inv.at<float>(2,0));
+        else world_direction = cv::Point3f( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0));
         // std::cout << "Rotation and translation " << std::endl;
     }
-    // oldMatches.prev_pts = inputMatches.copy();
     std::vector<cv::Point2f>().swap(inputMatches);
     std::vector<cv::Point2f>().swap(targetMatches);
-    inputImageGray.copyTo(oldImageGray);
     return {rotationMatrix, world_direction};
 }
 
@@ -534,7 +485,7 @@ double ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1,
     cv::Mat pts4D;
     cv::triangulatePoints(P1, P2, pts1, pts2, pts4D);
 
-    float totalError = 0;
+    double totalError = 0;
     int count = pts4D.cols;
     std::vector<cv::Point3f> objectPoints;
     for (int i = 0; i < count; i++) {
@@ -573,8 +524,8 @@ double ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1,
     cv::Mat refinedR;
     cv::Rodrigues(rvec, refinedR);
     // tvec is now the refined translation
-    tf = tvec;
-    Rf = refinedR;
+    // tf = tvec;
+    // Rf = refinedR;
     return totalError / count;
 }
 

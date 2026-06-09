@@ -2,10 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/features2d.hpp>
 // #include <string>
-struct TrackingState {
-    std::vector<cv::Point2f> prev_pts;     // Points in Frame (t-1)
-    std::vector<int> target_indices;       // Maps prev_pts[i] to target_kps[target_indices[i]]
-};
+
 
 class ImageMatcher {
 public:
@@ -21,19 +18,14 @@ public:
 private:
     cv::Mat targetImageGray;
     cv::Mat inputImageGray;
-    cv::Mat oldImageGray;
-    TrackingState oldMatches;
-    bool need_sift_refresh;
     std::vector<cv::KeyPoint> targetKeypoints;
     cv::Mat targetDescriptors;
     cv::Mat cameraMatrix;
-    int matches_length;
     std::vector<cv::Point2f> inputMatches, targetMatches;
     cv::Ptr<cv::SIFT> sift;
     // cv::Ptr<cv::BFMatcher> matcher;
     cv::FlannBasedMatcher matcherFlann;
     float width, height;
-
     // cv::TermCriteria criteria;
     cv::Point3f computeRotation();
     std::vector<cv::DMatch> goodMatcher(const cv::Mat& inputDescriptors);
@@ -41,8 +33,6 @@ private:
                                                         const std::vector<cv::KeyPoint>& queryKps,
                                                         int gridCols = 5, int gridRows = 4, int maxPerCell = 150);
     void detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors);
-    // void detectAndComputeLKFlow();
-    
     void detectAndComputegrid(const cv::Mat& image,
                                     std::vector<cv::KeyPoint>& keypoints,
                                     cv::Mat& descriptors,
