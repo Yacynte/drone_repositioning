@@ -324,7 +324,7 @@ int main()
 
 bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, float rot_error, float trans_error, cv::Point3f translation, std::string& data_to_send) {
 
-        static bool doingTrans = true;
+        static bool doingTrans = rotationOnly ? false : true;
         static float minRot = 0.5f;
         static float minTrans = 0.0f;
         static float targetRot = std::min(10.0f, std::max(minRot, rot_error/2)); // start with half the initial error, but cap to 10 to avoid long waits
@@ -351,7 +351,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         if(doingTrans && !rotationOnly) {
             
             if (trans_error < targetTrans ) {
-                doingTrans = false;
+                doingTrans = translationOnly ? true : false;
                 targetTrans = std::max(targetTrans/2, minTrans);
                 increment_switch = 0; // reset increment switch when doing rotation 
             }
@@ -367,7 +367,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         
         else if (!doingTrans && !translationOnly ) { 
             if (rot_error < targetRot) {
-                doingTrans = true;
+                doingTrans = rotationOnly ? false : true; // if in rotation-only mode, stay in rotation; otherwise switch to translation
                 targetRot = std::max(targetRot/2, minRot);
             }
             else {
