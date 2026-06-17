@@ -5,3 +5,5 @@ groundTruths/
 results/
 logs/
 targets/
+build_debug/
+build_release/

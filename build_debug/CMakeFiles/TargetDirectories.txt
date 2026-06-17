@@ -1,3 +1,0 @@
-/home/user/drone_repositioning/build_debug/CMakeFiles/ImageMatcher.dir
-/home/user/drone_repositioning/build_debug/CMakeFiles/edit_cache.dir
-/home/user/drone_repositioning/build_debug/CMakeFiles/rebuild_cache.dir
