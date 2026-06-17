@@ -4,3 +4,4 @@ build/
 groundTruths/
 results/
 logs/
+targets/
