@@ -212,7 +212,8 @@ int main(int argc, char** argv) {
         cv::Mat world_rotation_vec;
         cv::Rodrigues(rotationMatrix, world_rotation_vec);
         world_rotation_vec.convertTo(world_rotation_vec, CV_64F);
-        cv::Point3f rotation_vec = rotmatToYPRDeg_XYZ(rotationMatrix);
+        // cv::Point3f rotation_vec = rotmatToYPRDeg_XYZ(rotationMatrix);
+        cv::Point3f rotation_vec = rotmatToYPRDeg_ZYX(rotationMatrix);
         // world_rotation_vec *= 180.0 / CV_PI;
         cv::Mat axis = world_rotation_vec / cv::norm(world_rotation_vec);
         // const float rad2deg = 180.0 / CV_PI;
