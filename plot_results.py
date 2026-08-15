@@ -198,10 +198,10 @@ def main():
     print(f"🔍 Searching for log files in {repo_root}...")
     
     # Get MotionLog files (ground truth)
-    motion_int = 0  # Specify the lab number for GT file
+    motion_int = 3  # Specify the lab number for GT file
     # Look for GT (ground truth) file
-    gt_int = 0
-    motion_logs = sorted(list(repo_root.glob(f'results_pnec/rain/Results_MotionLog_*.csv')))
+    gt_int = 2
+    motion_logs = sorted(list(repo_root.glob(f'results_pnec/clear/Results_MotionLog_*.csv')))
     if not motion_logs:
         print("❌ No MotionLog files found in groundTruths/")
         return
@@ -210,10 +210,10 @@ def main():
     # gt_imgs = sorted(list(repo_root.glob(f'groundTruths_pnec/clear/Capture_*.png')))
     # results_imgs = sorted(list(repo_root.glob(f'results_pnec/clear/Results_Capture_*.png')))
     if gt_logs:
-        motion_log_1_path = gt_logs[motion_int+2]  # Use the GT file
+        motion_log_1_path = gt_logs[gt_int]  # Use the GT file
         # Get other motion logs for comparison
-        other_logs = sorted([f for f in motion_logs if 'GT' not in f.name])
-        motion_log_2_path = other_logs[motion_int] if other_logs else None
+        # other_logs = sorted([f for f in motion_logs if 'GT' not in f.name])
+        motion_log_2_path = motion_logs[motion_int] #if other_logs else None
         print(f"Loading ground truth (poses): {motion_log_1_path.name}")
         if motion_log_2_path:
             print(f"Loading Unreal Engine path (rates): {motion_log_2_path.name}")
@@ -249,8 +249,8 @@ def main():
     if motion_log_2_path:
         motion_df_2 = load_motion_log(motion_log_2_path)
         print(f"MotionLog 2 (UE path) shape: {motion_df_2.shape}")
-        output_file_rot = repo_root / f'results_pnec/rain/comparison_plot_rot{motion_log_2_path.name[9:-4]}.png'
-        output_file_poses = repo_root / f'results_pnec/rain/comparison_plot_trans{motion_log_2_path.name[9:-4]}.png'
+        output_file_rot = repo_root / f'results_pnec/clear/comparison_plot_rot{motion_log_2_path.name[9:-4]}.png'
+        output_file_poses = repo_root / f'results_pnec/clear/comparison_plot_trans{motion_log_2_path.name[9:-4]}.png'
         plot_comparison(motion_df_1, motion_df_2, output_file_rot, output_file_poses)
     else:
         print("⚠️  Skipping poses comparison (only one MotionLog file available)")

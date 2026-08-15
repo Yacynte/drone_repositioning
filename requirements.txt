@@ -7,7 +7,7 @@ onnxruntime
 # Core
 numpy #>=2.0,<3
 opencv-python #>=4.10,<5
-
+pandas
 # PyTorch
 # torch==2.13.0
 # torchvision==0.28.0

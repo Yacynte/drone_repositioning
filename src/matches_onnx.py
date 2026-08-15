@@ -266,12 +266,26 @@ class FeatureMatcherONNX:
                 kpts0, desc0, scores0 = self.sp_session.run( None, {'image': cur_tensor})
 
                 # Step 2: match against cached target features
-                mkpts0, mkpts1, scores = self.lg_session.run(None, {
+                outputs = self.lg_session.run(None, {
                     'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
                     'kpts1':   self.target_kpts,
                     'desc1':   self.target_desc,
                     'scores1': self.target_scores,
                 })
+
+                matches0 = outputs[0][0]   # [N]
+                scores0  = outputs[2][0]   # [N]
+
+                valid = matches0 >= 0
+
+                idx0 = np.nonzero(valid)[0]
+                idx1 = matches0[valid]
+                scores = scores0[valid]
+
+                # matches = np.stack([idx0, idx1], axis=1)
+
+                mkpts0 = kpts0[0][idx0]
+                mkpts1 = self.target_kpts[0][idx1]
 
                 mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
 

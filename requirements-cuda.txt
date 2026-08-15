@@ -1,4 +1,11 @@
--r requirements.txt
+scikit_image
+onnx 
+
+# Core
+numpy 
+opencv-python
+
+onnxscript
 
 torch==2.13.0
 torchvision==0.28.0
