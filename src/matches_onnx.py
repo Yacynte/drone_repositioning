@@ -142,8 +142,7 @@ class FeatureMatcherONNX:
         tensor = img.astype(np.float32) / 255.0
         tensor = tensor[None, None]  # (1,1,H,W)
 
-        self.target_kpts, self.target_desc, self.target_scores = \
-            self.sp_session.run(None, {'image': tensor})
+        self.target_kpts, self.target_desc, self.target_scores = self.sp_session.run(None, {'image': tensor})
         print(f"[Target] {target_image_path} → {self.target_kpts.shape[1]} keypoints cached")
 
 
@@ -264,9 +263,7 @@ class FeatureMatcherONNX:
                 # cur_tensor = np.expand_dims(np.expand_dims(cur_tensor, 0), 0)
                 cur_tensor = cur_tensor[None, None]
                 # Step 1: extract current frame features
-                kpts0, desc0, scores0 = self.sp_session.run(
-                    None, {'image': cur_tensor}
-                )
+                kpts0, desc0, scores0 = self.sp_session.run( None, {'image': cur_tensor})
 
                 # Step 2: match against cached target features
                 mkpts0, mkpts1, scores = self.lg_session.run(None, {
@@ -276,8 +273,10 @@ class FeatureMatcherONNX:
                     'scores1': self.target_scores,
                 })
 
-                covariances = self._compute_patch_covariances_numpy(cur_image, mkpts0)
-                self._write_matches(mkpts0, mkpts1, scores, covariances)
+                mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
+
+                covariances = self._compute_patch_covariances_numpy(cur_image, mkpts0_filtered)
+                self._write_matches(mkpts0_filtered, mkpts1_filtered, scores_filtered, covariances)
 
         finally:
             self._cleanup()

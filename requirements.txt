@@ -5,8 +5,8 @@ onnxruntime
 # pip install git+https://github.com/openai/CLIP.git
 
 # Core
-numpy>=2.0,<3
-opencv-python>=4.10,<5
+numpy #>=2.0,<3
+opencv-python #>=4.10,<5
 
 # PyTorch
 # torch==2.13.0
@@ -17,8 +17,8 @@ opencv-python>=4.10,<5
 # pip install -e .
 
 # ONNX export
-onnx==1.22.0
-onnxscript==0.7.1
+onnx #==1.22.0
+onnxscript #==0.7.1
 
 # ONNX validation / CPU inference
-onnxruntime==1.23.2
+onnxruntime #==1.23.2
