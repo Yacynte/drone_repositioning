@@ -4,36 +4,6 @@ import torch.nn as nn
 from pathlib import Path
 from lightglue import LightGlue, SuperPoint
 from lightglue.utils import rbd
-import lightglue.superpoint as superpoint_module
-
-
-def onnx_safe_simple_nms(scores: torch.Tensor, nms_radius: int) -> torch.Tensor:
-    """NMS equivalent to LightGlue's version, exported with 2-D MaxPool nodes.
-
-    LightGlue stores SuperPoint score maps as ``(B, H, W)``.  PyTorch accepts
-    that as an unbatched 2-D input to ``max_pool2d``, but the legacy ONNX
-    exporter emits a 2-D ``kernel_shape`` for a 3-D ONNX tensor.  ONNX Runtime
-    correctly rejects that graph.  Giving MaxPool an explicit channel axis
-    produces valid 4-D ONNX tensors while preserving the result exactly.
-    """
-    assert nms_radius >= 0
-
-    def max_pool(x: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.max_pool2d(
-            x.unsqueeze(1),
-            kernel_size=nms_radius * 2 + 1,
-            stride=1,
-            padding=nms_radius,
-        ).squeeze(1)
-
-    zeros = torch.zeros_like(scores)
-    max_mask = scores == max_pool(scores)
-    for _ in range(2):
-        supp_mask = max_pool(max_mask.float()) > 0
-        supp_scores = torch.where(supp_mask, zeros, scores)
-        new_max_mask = supp_scores == max_pool(supp_scores)
-        max_mask = max_mask | (new_max_mask & (~supp_mask))
-    return torch.where(max_mask, scores, zeros)
 
 
 class SuperPointExporter(nn.Module):
@@ -41,9 +11,6 @@ class SuperPointExporter(nn.Module):
     def __init__(self, max_num_keypoints: int):
         super().__init__()
         self.device = torch.device('cpu')
-        # See onnx_safe_simple_nms: patch only the exporter process, not the
-        # installed LightGlue package.
-        superpoint_module.simple_nms = onnx_safe_simple_nms
         self.sp = SuperPoint(max_num_keypoints=max_num_keypoints).eval().to(self.device)
 
     def forward(self, image: torch.Tensor):
@@ -164,14 +131,11 @@ if __name__ == '__main__':
     p.add_argument('--width',      type=int, default=1920)
     p.add_argument('--keypoints',  type=int, default=2048)
     p.add_argument('--output_dir', type=str, default='weights')
-    p.add_argument('--superpoint-only', action='store_true',
-                   help='Export only SuperPoint; use the supported pipeline exporter for LightGlue.')
     args = p.parse_args()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     export_superpoint(out_dir, args.height, args.width, args.keypoints)
-    if not args.superpoint_only:
-        export_lightglue(out_dir, args.keypoints)
+    export_lightglue(out_dir, args.keypoints)
     print("\nDone. Models saved to:", out_dir)
