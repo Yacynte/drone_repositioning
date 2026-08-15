@@ -1,0 +1,24 @@
+
+scikit_image
+onnx 
+onnxruntime
+# pip install git+https://github.com/openai/CLIP.git
+
+# Core
+numpy>=2.0,<3
+opencv-python>=4.10,<5
+
+# PyTorch
+# torch==2.13.0
+# torchvision==0.28.0
+
+# LightGlue
+# cd LightGlue
+# pip install -e .
+
+# ONNX export
+onnx==1.22.0
+onnxscript==0.7.1
+
+# ONNX validation / CPU inference
+onnxruntime==1.23.2

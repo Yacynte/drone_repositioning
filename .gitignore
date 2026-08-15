@@ -1,0 +1,17 @@
+build/
+.venv*
+.vscode/
+groundTruth*
+result*
+logs*
+src_/
+include_/
+*.pyc
+__pycache__/
+build_debug/
+data*/
+controls/images*
+controls/groundTruths
+LightGlue*
+targets*
+weights*
