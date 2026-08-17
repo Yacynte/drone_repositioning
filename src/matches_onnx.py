@@ -126,14 +126,32 @@ class FeatureMatcherONNX:
         print("[FeatureMatcher] Available:", available)
         print("[FeatureMatcher] Requested:", providers)
 
-        session = ort.InferenceSession(
-            model_path,
-            providers=providers,
-        )
-
+        # session = ort.InferenceSession(
+        #     model_path,
+        #     providers=providers,
+        # )
+        session = self.create_session(model_path, providers)
         print("[FeatureMatcher] Active:", session.get_providers())
 
         return session
+
+    def create_session(model_path, provider):
+        so = ort.SessionOptions()
+
+        so.intra_op_num_threads = 4
+        so.inter_op_num_threads = 1
+
+        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+        # Diagnostic: reduce persistent host-side allocations
+        so.enable_mem_pattern = False
+        so.enable_cpu_mem_arena = False
+
+        return ort.InferenceSession(
+            model_path,
+            sess_options=so,
+            providers=provider,
+        )
 
     def set_target(self, target_image_path: str):
         """Call this whenever the target image changes — no re-export needed."""

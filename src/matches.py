@@ -334,7 +334,7 @@ class FeatureMatcher:
 
     def _cleanup(self):
         self.shm_frames.close()
-        self.shm_frames.unlink()
+        # self.shm_frames.unlink()
         self.buf[0] = 0   # signal shutdown to C++
         time.sleep(0.1)
         self.shm.close()

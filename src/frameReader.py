@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from typing import Optional
-
+import onnxruntime as ort
 import cv2
 import numpy as np
 
@@ -198,6 +198,10 @@ class FrameReader:
 
     def _drone_reader_loop(self):
         """Real drone / camera via OpenCV VideoCapture (DroneReaderLoop)."""
+        # --- FPS tracking variables ---
+        fps_counter = 0
+        fps_timer = time.time()
+        current_fps = 0.0
         while self._running:
             if self._cap is None or not self._cap.isOpened():
                 time.sleep(0.05)
@@ -214,8 +218,25 @@ class FrameReader:
             with self._lock:
                 self._last_frame = frame
 
+            # --- FPS calculation logic ---
+            fps_counter += 1
+            elapsed_time = time.time() - fps_timer
+
+            # Update FPS every 1.0 second
+            if elapsed_time >= 1.0:
+                current_fps = fps_counter / elapsed_time
+                print(f"Current FPS: {current_fps:.2f}")
+                
+                # Reset counter and timer
+                fps_counter = 0
+                fps_timer = time.time()
+
     def _tcp_reader_loop(self):
         """Raw BGRA frames over TCP socket (TcpReaderLoop)."""
+        # --- FPS tracking variables ---
+        fps_counter = 0
+        fps_timer = time.time()
+        current_fps = 0.0
         while self._running:
             if self._sock is None:
                 print("TCP: socket is None, attempting reconnect …")
@@ -228,6 +249,9 @@ class FrameReader:
                 print("TCP: connection lost — attempting reconnect …")
                 self._sock = None   # force reconnect on next iteration
                 self._last_frame = None
+                # Reset FPS metrics on disconnect
+                fps_counter = 0
+                fps_timer = time.time()
                 time.sleep(1.0)
                 continue
 
@@ -239,6 +263,19 @@ class FrameReader:
 
             with self._lock:
                 self._last_frame = frame
+
+            # --- FPS calculation logic ---
+            fps_counter += 1
+            elapsed_time = time.time() - fps_timer
+
+            # Update FPS every 1.0 second
+            if elapsed_time >= 1.0:
+                current_fps = fps_counter / elapsed_time
+                print(f"Current FPS: {current_fps:.2f}")
+                
+                # Reset counter and timer
+                fps_counter = 0
+                fps_timer = time.time()
 
     def _reader_loop(self):
         """RTSP via FFmpeg pipe → raw BGR frames (readerLoop)."""
@@ -319,6 +356,54 @@ class FrameReader:
         return float(cv2.mean(gray)[0]) < threshold
 
 
+def get_session( model_path, provider="auto"):
+        available = ort.get_available_providers()
+        
+        # Configure session options to bypass strict shape inference failures on legacy attributes
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # This prevents ONNX Runtime from throwing shape inference errors on custom/imported nodes like MaxPool
+        sess_options.add_session_config_entry("session.load_model_fmt", "Protobuf")
+
+        if provider == "cpu":
+            providers = ["CPUExecutionProvider"]
+        elif provider == "cuda":
+            if "CUDAExecutionProvider" not in available:
+                raise RuntimeError("CUDAExecutionProvider is not available")
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        elif provider == "auto":
+            if "CUDAExecutionProvider" in available:
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            else:
+                providers = ["CPUExecutionProvider"]
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+
+        print("[FeatureMatcher] Available:", available)
+        print("[FeatureMatcher] Requested:", providers)
+
+        session = ort.InferenceSession(
+            model_path,
+            sess_options=sess_options,  # Pass the customized options here
+            providers=providers,
+        )
+
+        print("[FeatureMatcher] Active:", session.get_providers())
+        return session
+
+
+def set_target( target_image_path: str):
+    """Call this whenever the target image changes — no re-export needed."""
+    img = cv2.imread(target_image_path, cv2.IMREAD_GRAYSCALE)
+    # img = cv2.resize(img, (1920, 1080))
+    tensor = img.astype(np.float32) / 255.0
+    tensor = tensor[None, None]  # (1,1,H,W)
+
+    return tensor
+    # target_kpts, target_desc, target_scores = sp_session.run(None, {'image': tensor})
+    # print(f"[Target] {target_image_path} → {target_kpts.shape[1]} keypoints cached")
+
+
 # ---------------------------------------------------------------------------
 # Usage examples
 # ---------------------------------------------------------------------------
@@ -327,30 +412,91 @@ if __name__ == "__main__":
 
     # --- Drone / real camera (unreal_test=False) ---
     # cap = cv2.VideoCapture("rtsp://192.168.1.1/live")
-    # reader = FrameReader("", width=1280, height=720, unreal_test=False)
-    # reader.start(external_cap=cap)
+    # cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    reader = FrameReader("", width=1920, height=1080, unreal_test=False)
+    reader.start(external_cap=cap)
 
     # --- UE5 TCP stream (unreal_test=True, tcp URL) ---
-    # reader = FrameReader("tcp://192.168.1.10:5005", width=1280, height=720, unreal_test=True)
+    # reader = FrameReader("tcp://10.116.88.38:9000", width=1920, height=1080, unreal_test=True)
     # reader.start()
 
-    # --- UE5 RTSP via FFmpeg (unreal_test=True, rtsp URL) ---
-    reader = FrameReader(
-        url="rtsp://192.168.1.1/live",
-        width=1280,
-        height=720,
-        unreal_test=True,
-        dark_threshold=10.0,
-    )
-    reader.start()
+    sp_session = get_session("weights/superpoint.onnx")
+    lg_session = get_session("weights/lightglue.onnx")
+    tensor_target = set_target("groundTruths_pnec/clear/Capture_002.png")
+    target_kpts, target_desc, target_scores = sp_session.run(None, {'image': tensor_target})
 
+    # # --- UE5 RTSP via FFmpeg (unreal_test=True, rtsp URL) ---
+    # reader = FrameReader(
+    #     url="rtsp://192.168.1.1/live",
+    #     width=1280,
+    #     height=720,
+    #     unreal_test=True,
+    #     dark_threshold=10.0,
+    # )
+    # reader.start()
+    i = 0
+    
+    total_sp_time = 0.0
+    total_lg_time = 0.0
+    total_pipeline_time = 0.0
     try:
-        while True:
-            frame = reader.get_frame()
-            if frame is not None:
-                cv2.imshow("FrameReader", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        if reader.is_opened():
+            while i < 200:
+                frame = reader.get_frame()
+                if frame is not None:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    cur_tensor = frame.astype(np.float32) / 255.0
+                    cur_tensor = cur_tensor[None, None]
+
+                    # --- Start timing the AI pipeline ---
+                    t_start = time.perf_counter()
+
+                    # Step 1: extract current frame features
+                    t_sp_start = time.perf_counter()
+                    kpts0, desc0, scores0 = sp_session.run( None, {'image': cur_tensor})
+                    t_sp_end = time.perf_counter()
+
+                    # Step 2: match against cached target features
+                    t_lg_start = time.perf_counter()
+                    outputs = lg_session.run(None, {
+                        'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
+                        'kpts1':   target_kpts,
+                        'desc1':   target_desc,
+                        'scores1': target_scores,
+                    })
+                    t_lg_end = time.perf_counter()
+                
+                    t_end = time.perf_counter()
+                    # --- End timing ---
+
+                    # Accumulate times (in milliseconds)
+                    sp_duration = (t_sp_end - t_sp_start) * 1000.0
+                    lg_duration = (t_lg_end - t_lg_start) * 1000.0
+                    pipeline_duration = (t_end - t_start) * 1000.0
+
+                    total_sp_time += sp_duration
+                    total_lg_time += lg_duration
+                    total_pipeline_time += pipeline_duration
+
+                    print(f"Frame {i+1} | SuperPoint: {sp_duration:.2f} ms | LightGlue: {lg_duration:.2f} ms | Total: {pipeline_duration:.2f} ms")
+                    # cv2.imshow("FrameReader", frame)
+                #     cv2.imshow("FrameReader.png", frame)
+                # if cv2.waitKey(1) & 0xFF == ord("q"):
+                #     break
+                    i+=1
+            # Print summary averages after the loop finishes
+            print("\n--- Benchmark Summary (Average over 200 frames) ---")
+            print(f"SuperPoint Average: {total_sp_time / 200:.2f} ms")
+            print(f"LightGlue Average:  {total_lg_time / 200:.2f} ms")
+            print(f"Pipeline Average:   {total_pipeline_time / 200:.2f} ms")
+            print(f"Average FPS:        {200 / (total_pipeline_time / 1000.0):.2f}")
+        else:
+            print("Stream is not available")
     finally:
         reader.stop()
         cv2.destroyAllWindows()
