@@ -7,32 +7,55 @@ import torch.nn as nn
 from lightglue import LightGlue
 
 
-class LightGlueIndependent(nn.Module):
+class StaticLightGlue(nn.Module):
     """
-    Standalone LightGlue ONNX wrapper.
+    Static LightGlue wrapper.
 
-    Inputs:
-        kpts0   [B, N, 2]
-        desc0   [B, N, 256]
-        scores0 [B, N]
+    Inputs
+    ------
+    kpts0:
+        [1, N, 2] float32
+    kpts1:
+        [1, N, 2] float32
 
-        kpts1   [B, M, 2]
-        desc1   [B, M, 256]
-        scores1 [B, M]
+    desc0:
+        [1, N, 256] float32
 
-    Outputs:
-        matches0           [B, N]
-        matches1           [B, M]
-        matching_scores0   [B, N]
-        matching_scores1   [B, M]
+    desc1:
+        [1, N, 256] float32
 
-    N and M are dynamic.
+    scores0:
+        [1, N] float32
+
+    scores1:
+        [1, N] float32
+
+    Outputs
+    -------
+    matches0:
+        [1, N] int64
+        Index of matching keypoint in image1, or -1.
+
+    matches1:
+        [1, N] int64
+        Index of matching keypoint in image0, or -1.
+
+    matching_scores0:
+        [1, N] float32
+
+    matching_scores1:
+        [1, N] float32
     """
 
-    def __init__(self):
+    def __init__(self, num_keypoints=1024):
         super().__init__()
 
-        self.lg = LightGlue(
+        self.num_keypoints = num_keypoints
+
+        # Disable adaptive pruning / early stopping.
+        #
+        # This is important for a static graph.
+        self.matcher = LightGlue(
             features="superpoint",
             depth_confidence=-1,
             width_confidence=-1,
@@ -41,151 +64,149 @@ class LightGlueIndependent(nn.Module):
     def forward(
         self,
         kpts0,
-        desc0,
-        scores0,
-        mask0,
         kpts1,
+        desc0,
         desc1,
+        scores0,
         scores1,
-        mask1,
     ):
-        # 1. Extract the boolean mask for the first batch item
-        m = mask1[0]  # Shape: [2048]
-
-        # 2. Index and re-add the batch dimension [None, :, :] to restore shape [1, N_valid, D]
-        filtered_kpts0 = kpts0[0][m].unsqueeze(0)     # Shape: [1, N_valid, 2]
-        filtered_desc0 = desc0[0][m].unsqueeze(0)     # Shape: [1, N_valid, 256]
-        filtered_scores0 = scores0[0][m].unsqueeze(0) # Shape: [1, N_valid]0
-
-        # 1. Extract the boolean mask for the first batch item
-        m1 = mask1[0]  # Shape: [2048]
-
-        # 2. Index and re-add the batch dimension [None, :, :] to restore shape [1, N_valid, D]
-        filtered_kpts1 = kpts1[0][m1].unsqueeze(0)     # Shape: [1, N_valid, 2]
-        filtered_desc1 = desc1[0][m1].unsqueeze(0)     # Shape: [1, N_valid, 256]
-        filtered_scores1 = scores1[0][m1].unsqueeze(0) # Shape: [1, N_valid]
-        
-        features0 = {
-            "keypoints": filtered_kpts0,
-            "keypoint_scores": filtered_scores0,
-            "descriptors": filtered_desc0,
+        feats0 = {
+            "keypoints": kpts0,
+            "descriptors": desc0,
+            "keypoint_scores": scores0,
         }
 
-        features1 = {
-            "keypoints": filtered_kpts1,
-            "keypoint_scores": filtered_scores1,
-            "descriptors": filtered_desc1,
+        feats1 = {
+            "keypoints": kpts1,
+            "descriptors": desc1,
+            "keypoint_scores": scores1,
         }
 
-        result = self.lg(
+        out = self.matcher(
             {
-                "image0": features0,
-                "image1": features1,
+                "image0": feats0,
+                "image1": feats1,
             }
         )
 
         return (
-            result["matches0"],
-            result["matches1"],
-            result["matching_scores0"],
-            result["matching_scores1"],
+            out["matches0"],
+            out["matches1"],
+            out["matching_scores0"],
+            out["matching_scores1"],
         )
 
 
-def export_model(
-    output: Path,
-    max_keypoints: int,
-):
-    print("Creating LightGlue...")
+def main():
+    parser = argparse.ArgumentParser()
 
-    model = LightGlueIndependent().eval()
+    parser.add_argument(
+        "--keypoints",
+        type=int,
+        default=1024,
+        help="Fixed number of keypoints per image.",
+    )
 
-    print("Creating dummy inputs...")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="weights/lightglue_static_1024.onnx",
+    )
 
-    kpts0 = torch.randn(
-        1, max_keypoints, 2,
+    parser.add_argument(
+        "--opset",
+        type=int,
+        default=17,
+    )
+
+    args = parser.parse_args()
+
+    N = args.keypoints
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("Static LightGlue ONNX export")
+    print("=" * 70)
+
+    print(f"Keypoints : {N}")
+    print("Batch     : 1")
+    print("Descriptor: 256")
+    print(f"Output    : {output}")
+    print(f"Opset     : {args.opset}")
+    print()
+
+    model = StaticLightGlue(
+        num_keypoints=N
+    ).eval()
+
+    # ------------------------------------------------------------
+    # Fixed-shape dummy inputs
+    # ------------------------------------------------------------
+
+    kpts0 = torch.zeros(
+        1, N, 2,
+        dtype=torch.float32,
+    )
+
+    kpts1 = torch.zeros(
+        1, N, 2,
         dtype=torch.float32,
     )
 
     desc0 = torch.randn(
-        1, max_keypoints, 256,
-        dtype=torch.float32,
-    )
-
-    scores0 = torch.rand(
-        1, max_keypoints,
-        dtype=torch.float32,
-    )
-
-    mask0 = torch.randint(
-        0, 2, (1, max_keypoints),
-        dtype=torch.bool,
-    )
-
-    kpts1 = torch.randn(
-        1, max_keypoints, 2,
+        1, N, 256,
         dtype=torch.float32,
     )
 
     desc1 = torch.randn(
-        1, max_keypoints, 256,
+        1, N, 256,
         dtype=torch.float32,
     )
 
-    scores1 = torch.rand(
-        1, max_keypoints,
+    scores0 = torch.ones(
+        1, N,
         dtype=torch.float32,
     )
 
-    mask1 = torch.randint(
-        0, 2, (1, max_keypoints),
-        dtype=torch.bool,
+    scores1 = torch.ones(
+        1, N,
+        dtype=torch.float32,
     )
 
     inputs = (
         kpts0,
-        desc0,
-        scores0,
-        mask0,
         kpts1,
+        desc0,
         desc1,
+        scores0,
         scores1,
-        mask1,
     )
 
-    # --------------------------------------------------------
-    # PyTorch sanity test
-    # --------------------------------------------------------
+    # ------------------------------------------------------------
+    # Test PyTorch model first
+    # ------------------------------------------------------------
 
     print("Running PyTorch test...")
 
     with torch.no_grad():
         outputs = model(*inputs)
 
-    names = [
-        "matches0",
-        "matches1",
-        "matching_scores0",
-        "matching_scores1",
-    ]
-
-    for name, value in zip(names, outputs):
+    for i, x in enumerate(outputs):
         print(
-            f"  {name:20s}",
-            tuple(value.shape),
-            value.dtype,
+            f"  output {i}: "
+            f"shape={tuple(x.shape)}, "
+            f"dtype={x.dtype}"
         )
 
-    # --------------------------------------------------------
-    # ONNX export
-    # --------------------------------------------------------
+    print()
 
-    print("\nExporting ONNX...")
+    # ------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------
 
-    output.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    print("Exporting ONNX...")
 
     torch.onnx.export(
         model,
@@ -193,14 +214,12 @@ def export_model(
         str(output),
 
         input_names=[
-            "kpts0",
-            "desc0",
+            "keypoints0",
+            "keypoints1",
+            "descriptors0",
+            "descriptors1",
             "scores0",
-            "mask0",
-            "kpts1",
-            "desc1",
             "scores1",
-            "mask1",
         ],
 
         output_names=[
@@ -210,45 +229,107 @@ def export_model(
             "matching_scores1",
         ],
 
+        # IMPORTANT:
+        # No dynamic_axes.
+        #
+        # Every tensor dimension is fixed.
         dynamic_axes=None,
 
-        opset_version=18,
+        opset_version=args.opset,
+
         do_constant_folding=True,
-        # dynamo=False,
+
+        dynamo=False,
     )
 
-    print(f"\nSaved: {output}")
+    print()
+    print("Export complete.")
+    print(output)
 
+    # ------------------------------------------------------------
+    # ONNX verification
+    # ------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser()
+    print()
+    print("Checking ONNX...")
 
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path(
-            "weights/lightglue_static.onnx"
-        ),
+    import onnx
+
+    onnx_model = onnx.load(str(output))
+
+    onnx.checker.check_model(onnx_model)
+
+    print("ONNX checker: OK")
+
+    # ------------------------------------------------------------
+    # ONNX Runtime test
+    # ------------------------------------------------------------
+
+    import onnxruntime as ort
+    import numpy as np
+
+    print()
+    print("Testing ONNX Runtime...")
+
+    session = ort.InferenceSession(
+        str(output),
+        providers=["CPUExecutionProvider"],
     )
 
-    parser.add_argument(
-        "--max_keypoints",
-        type=int,
-        default=2048,
+    print("Inputs:")
+
+    for x in session.get_inputs():
+        print(
+            f"  {x.name}: "
+            f"{x.shape} "
+            f"{x.type}"
+        )
+
+    print("Outputs:")
+
+    for x in session.get_outputs():
+        print(
+            f"  {x.name}: "
+            f"{x.shape} "
+            f"{x.type}"
+        )
+
+    ort_inputs = {
+        "keypoints0": kpts0.numpy(),
+        "keypoints1": kpts1.numpy(),
+        "descriptors0": desc0.numpy(),
+        "descriptors1": desc1.numpy(),
+        "scores0": scores0.numpy(),
+        "scores1": scores1.numpy(),
+    }
+
+    ort_outputs = session.run(
+        None,
+        ort_inputs,
     )
 
-    # parser.add_argument(
-    #     "--n1",
-    #     type=int,
-    #     default=511,
-    # )
+    print()
+    print("ORT outputs:")
 
-    args = parser.parse_args()
+    for name, x in zip(
+        [
+            "matches0",
+            "matches1",
+            "matching_scores0",
+            "matching_scores1",
+        ],
+        ort_outputs,
+    ):
+        print(
+            f"  {name}: "
+            f"shape={x.shape}, "
+            f"dtype={x.dtype}"
+        )
 
-    export_model(
-        args.output,
-        args.max_keypoints,
-    )
+    print()
+    print("=" * 70)
+    print("SUCCESS")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

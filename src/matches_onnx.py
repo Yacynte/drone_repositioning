@@ -36,7 +36,7 @@ class FeatureMatcherONNX:
 
         # ── ONNX Runtime Session with TensorRT Provider ─────────────────────────
         self.sp_session = self.get_session("weights/superpoint.onnx")
-        self.lg_session = self.get_session("weights/lightglue.onnx")
+        self.lg_session = self.get_session("weights/lightglue_static.onnx")
 
         # Extract and cache target features — call again to switch target
         self.set_target(target_image_path)
@@ -160,9 +160,60 @@ class FeatureMatcherONNX:
         tensor = img.astype(np.float32) / 255.0
         tensor = tensor[None, None]  # (1,1,H,W)
 
-        self.target_kpts, self.target_desc, self.target_scores = self.sp_session.run(None, {'image': tensor})
+        (self.target_kpts, self.target_desc, self.target_scores, self.target_mask, 
+                            self.target_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': tensor}))
         print(f"[Target] {target_image_path} → {self.target_kpts.shape[1]} keypoints cached")
 
+    def pad_superpoint(self, kpts, desc, scores):
+        """
+        Convert variable-length SuperPoint output into
+        fixed-size tensors.
+
+        Returns:
+            kpts    [1, MAX, 2]
+            desc    [1, MAX, 256]
+            scores  [1, MAX]
+            mask    [1, MAX]
+            n       int
+        """
+
+        n = kpts.shape[1]
+        max_keypoints = self.MAX_KP_MATCHES
+        if n > max_keypoints:
+            kpts = kpts[:, :max_keypoints, :]
+            desc = desc[:, :max_keypoints, :]
+            scores = scores[:, :max_keypoints]
+            n = max_keypoints
+
+        pad = max_keypoints - n
+
+        if pad > 0:
+            kpts = np.pad(
+                kpts,
+                ((0, 0), (0, pad), (0, 0)),
+                constant_values=0,
+            )
+
+            desc = np.pad(
+                desc,
+                ((0, 0), (0, pad), (0, 0)),
+                constant_values=0,
+            )
+
+            scores = np.pad(
+                scores,
+                ((0, 0), (0, pad)),
+                constant_values=0,
+            )
+
+        mask = np.zeros(
+            (1, max_keypoints),
+            dtype=np.bool_,
+        )
+
+        mask[:, :n] = True
+
+        return kpts, desc, scores, mask, n
 
     def _shutdown(self, sig=None, frame=None):
         self.running = False
@@ -281,22 +332,26 @@ class FeatureMatcherONNX:
                 # cur_tensor = np.expand_dims(np.expand_dims(cur_tensor, 0), 0)
                 cur_tensor = cur_tensor[None, None]
                 # Step 1: extract current frame features
-                kpts0, desc0, scores0 = self.sp_session.run( None, {'image': cur_tensor})
-
+                # kpts0_, desc0_, scores0_ = self.sp_session.run( None, {'image': cur_tensor})
+                (kpts0, desc0, scores0, cur_mask, 
+                                            cur_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': cur_tensor}))
+                # kpts0, desc0, scores0 = self._pad_features(kpts0_, desc0_, scores0_)
                 # Step 2: match against cached target features
                 outputs = self.lg_session.run(None, {
                     'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
-                    'kpts1':   self.target_kpts,
-                    'desc1':   self.target_desc,
-                    'scores1': self.target_scores,
-                })
+                    'kpts1':   self.target_kpts, 'desc1':   self.target_desc, 'scores1': self.target_scores })
 
                 matches0 = outputs[0][0]   # [N]
                 scores0  = outputs[2][0]   # [N]
 
-                valid = matches0 >= 0
+                valid = (
+                    (np.arange(len(matches0)) < cur_num_keypoints) &
+                    (matches0 >= 0) &
+                    (matches0 < self.target_num_keypoints)
+                )
+                # valid = matches0 >= 0
 
-                idx0 = np.nonzero(valid)[0]
+                idx0 = np.where(valid)[0]
                 idx1 = matches0[valid]
                 scores = scores0[valid]
 
@@ -305,10 +360,10 @@ class FeatureMatcherONNX:
                 mkpts0 = kpts0[0][idx0]
                 mkpts1 = self.target_kpts[0][idx1]
 
-                mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
+                # mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
 
-                covariances = self._compute_patch_covariances_numpy(cur_image, mkpts0_filtered)
-                self._write_matches(mkpts0_filtered, mkpts1_filtered, scores_filtered, covariances)
+                covariances = self._compute_patch_covariances_numpy(cur_image, mkpts0)
+                self._write_matches(mkpts0, mkpts1, scores, covariances)
 
         finally:
             self._cleanup()

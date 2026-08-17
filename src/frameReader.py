@@ -404,6 +404,57 @@ def set_target( target_image_path: str):
     # print(f"[Target] {target_image_path} → {target_kpts.shape[1]} keypoints cached")
 
 
+def pad_superpoint(self, kpts, desc, scores):
+        """
+        Convert variable-length SuperPoint output into
+        fixed-size tensors.
+
+        Returns:
+            kpts    [1, MAX, 2]
+            desc    [1, MAX, 256]
+            scores  [1, MAX]
+            mask    [1, MAX]
+            n       int
+        """
+
+        n = kpts.shape[1]
+        max_keypoints = self.MAX_KP_MATCHES
+        if n > max_keypoints:
+            kpts = kpts[:, :max_keypoints, :]
+            desc = desc[:, :max_keypoints, :]
+            scores = scores[:, :max_keypoints]
+            n = max_keypoints
+
+        pad = max_keypoints - n
+
+        if pad > 0:
+            kpts = np.pad(
+                kpts,
+                ((0, 0), (0, pad), (0, 0)),
+                constant_values=0,
+            )
+
+            desc = np.pad(
+                desc,
+                ((0, 0), (0, pad), (0, 0)),
+                constant_values=0,
+            )
+
+            scores = np.pad(
+                scores,
+                ((0, 0), (0, pad)),
+                constant_values=0,
+            )
+
+        mask = np.zeros(
+            (1, max_keypoints),
+            dtype=np.bool_,
+        )
+
+        mask[:, :n] = True
+
+        return kpts, desc, scores, mask, n
+
 # ---------------------------------------------------------------------------
 # Usage examples
 # ---------------------------------------------------------------------------
@@ -413,22 +464,24 @@ if __name__ == "__main__":
     # --- Drone / real camera (unreal_test=False) ---
     # cap = cv2.VideoCapture("rtsp://192.168.1.1/live")
     # cap = cv2.VideoCapture(0)
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    reader = FrameReader("", width=1920, height=1080, unreal_test=False)
-    reader.start(external_cap=cap)
+    # cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+    # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    # cap.set(cv2.CAP_PROP_FPS, 30)
+    # reader = FrameReader("", width=1920, height=1080, unreal_test=False)
+    # reader.start(external_cap=cap)
 
     # --- UE5 TCP stream (unreal_test=True, tcp URL) ---
-    # reader = FrameReader("tcp://10.116.88.38:9000", width=1920, height=1080, unreal_test=True)
-    # reader.start()
+    reader = FrameReader("tcp://10.116.88.38:9000", width=1920, height=1080, unreal_test=True)
+    reader.start()
 
     sp_session = get_session("weights/superpoint.onnx")
-    lg_session = get_session("weights/lightglue.onnx")
+    lg_session = get_session("weights/lightglue_static.onnx")
     tensor_target = set_target("groundTruths_pnec/clear/Capture_002.png")
-    target_kpts, target_desc, target_scores = sp_session.run(None, {'image': tensor_target})
+    # target_kpts, target_desc, target_scores = sp_session.run(None, {'image': tensor_target})
+    (target_kpts, target_desc, target_scores, target_mask, 
+                                target_num_keypoints) = pad_superpoint(*sp_session.run(None, {'image': tensor_target}))
 
     # # --- UE5 RTSP via FFmpeg (unreal_test=True, rtsp URL) ---
     # reader = FrameReader(
@@ -458,7 +511,9 @@ if __name__ == "__main__":
 
                     # Step 1: extract current frame features
                     t_sp_start = time.perf_counter()
-                    kpts0, desc0, scores0 = sp_session.run( None, {'image': cur_tensor})
+                    # kpts0, desc0, scores0 = sp_session.run( None, {'image': cur_tensor})
+                    (kpts0, desc0, scores0, cur_mask, 
+                                                    cur_num_keypoints) = pad_superpoint(*sp_session.run(None, {'image': cur_tensor}))
                     t_sp_end = time.perf_counter()
 
                     # Step 2: match against cached target features
