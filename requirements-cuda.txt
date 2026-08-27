@@ -5,9 +5,9 @@ onnx
 numpy 
 opencv-python
 
-onnxscript
+# onnxscript
 
-torch==2.13.0
-torchvision==0.28.0
+# torch==2.13.0
+# torchvision==0.28.0
 
-onnxruntime-gpu==1.23.2
+# onnxruntime-gpu==1.23.2

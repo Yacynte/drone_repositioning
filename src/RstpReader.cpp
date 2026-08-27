@@ -30,9 +30,9 @@ RtspReader::RtspReader(const std::string& url, int width, int height, bool unrea
                 "ffmpeg -rtsp_transport tcp -i \"" + url + "\" "
                 "-f rawvideo -pix_fmt bgr24 -";
         }
-        RtspReader::create_and_map_shm();
 
     }
+    RtspReader::create_and_map_shm();
     // if(externalCap != nullptr) cap = externalCap;
 
 }
@@ -126,12 +126,14 @@ bool RtspReader::receiveImage(int sock, cv::Mat& outImage) {
 
 
 void RtspReader::start(cv::VideoCapture* externalCap) {
-    std::cout << " [RtspReader] Loop for IP: " << ip << ", Port: " << port << "Unreal test: " << unreal_test_ << std::endl;
+    
     if(!unreal_test_){
-        if(externalCap != nullptr) {    
+        if(externalCap != nullptr) {
+            std::cout << " [RtspReader] Loop for Live camera " << std::endl;    
             cap = externalCap;
             running_ = true;
             thread_ = std::thread(&RtspReader::DroneReaderLoop, this);
+            std::cout << " [RtspReader] Started live image loop\n";
         }
         else{
             std::cerr << " [RtspReader] Error video capture is null" << std::endl;
@@ -152,8 +154,9 @@ void RtspReader::start(cv::VideoCapture* externalCap) {
 }
 
 void RtspReader::stop() {
+    running_ = false;
     if (unreal_test_){
-            running_ = false;
+            
             if (pipe_) {
         #ifdef _WIN32
                 _pclose(pipe_);
@@ -165,22 +168,33 @@ void RtspReader::stop() {
             if (thread_.joinable()) thread_.join();
     }
     else {
-        if (cap != nullptr) {
-            while (cap->isOpened()){
-                cap->release();
-            }
-            cv::destroyAllWindows();
+        // running_ = false;
+
+        if (thread_.joinable())
+            thread_.join();
+
+        if (cap != nullptr && cap->isOpened())
+            cap->release();
         }
-        running_ = false;
-        if (thread_.joinable()) thread_.join();
-    }
+    cleanupSharedMemory();
+    
 }
 
-bool RtspReader::getFrame(cv::Mat& out) {
-    std::lock_guard<std::mutex> lock(frameMutex_);
-    if (lastFrame_.empty()) return false;
-    out = lastFrame_.clone();
-    return !isImageDark(out);
+// bool RtspReader::getFrame(cv::Mat& out)
+std::tuple<cv::Mat, bool> RtspReader::getFrame()
+{
+    cv::Mat out;
+    {
+        std::lock_guard<std::mutex> lock(frameMutex_);
+
+        if (lastFrame_.empty())
+            return {cv::Mat(), false};
+
+        out = std::move(lastFrame_);  // ← pointer swap, ~nanoseconds
+                                      //   lastFrame_ is empty() == true after this
+    }
+
+    return {out, true};
 }
 
 void RtspReader::readerLoop() {
@@ -232,24 +246,125 @@ bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
 }
 
 void RtspReader::DroneReaderLoop(){
-    while (running_){
-        cv::Mat frame;
-        if (cap != nullptr && cap->isOpened()){
-            // Quickly clear the buffer to ensure you get the freshest frame
-            for(int i = 0; i < 5; ++i) {
-                cap->grab(); 
-            }
-            bool success = cap->read(frame);
-            if (!success || frame.empty()) continue;
-            cv::Mat grayFrame;
-            cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
-            {
-                std::lock_guard<std::mutex> lock(frameMutex_);
-                grayFrame.copyTo(lastFrame_);
-                // std::cout << "new frame read" << std::endl;
-            }
-            write_frame(grayFrame);
+    std::cout << " [RtspReader] Started DroneReaderLoop\n";
+    int droppedFrames = 0;
+    cv::Mat frame_;
+    bool suc;
+    std::cout << "[RTSP Reader] test frame 0" << std::endl;
+    while (droppedFrames < 20 && cap->grab() ) {
+        // std::cout << "[RTSP Reader] read frame: " << droppedFrames << std::endl;
+        suc = cap->read(frame_);
+        if (!suc || frame_.empty()) {
+            std::cerr << "[RTSP Reader] Failed to read frame"
+                    << " suc=" << suc
+                    << " empty=" << frame_.empty()
+                    << std::endl;
         }
+        // If your loop was blocked for a while, this rapidly skips 
+        // through old buffered frames to catch up to live.
+        // Break early if we think we are close to live (optional heuristic)
+        droppedFrames++;
+    }
+    std::cout << "[RTSP Reader] test frame" << std::endl;
+    if (suc) cv::imwrite("testcpp.png", frame_);
+    else (std::cerr << "[RTSP Reader] cannot read test frame\n");
+
+    // std::cout << "[RtspReader] Started DroneReaderLoop\n";
+
+    auto reconnect = [&]() -> bool {
+        std::cerr << "[CAM] Reconnecting to camera...\n";
+        cap->release();
+
+        // Wait for the device node to come back
+        // for (int i = 0; i < 10; ++i) {
+        //     std::this_thread::sleep_for(std::chrono::seconds(1));
+        //     if (std::filesystem::exists(devicePath_)) break;
+        //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
+        // }
+
+        cap->open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
+        if (!cap->isOpened()) {
+            std::cerr << "[CAM] Reconnect failed\n";
+            return false;
+        }
+
+        // Re-apply your capture settings
+        cap->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+        cap->set(cv::CAP_PROP_FRAME_WIDTH,  1920);
+        cap->set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
+        cap->set(cv::CAP_PROP_FPS,          30);
+        cap->set(cv::CAP_PROP_BUFFERSIZE,   4);
+
+        // Flush stale frames
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        cv::Mat tmp;
+        for (int i = 0; i < 10; ++i) cap->read(tmp);
+
+        std::cerr << "[CAM] Reconnected\n";
+        return true;
+    };
+
+    int failCount = 0;
+    const int MAX_FAILS = 100;
+    const int MAX_TRIALS = 10;
+    int trialCount = 0;
+
+    while (running_) {
+        cv::Mat frame;
+
+        // std::cerr << "[CAM] before grab\n";
+
+        // for (int i = 0; i < 5; ++i) {
+        //     bool ok = cap->grab();
+        //     // std::cerr << "[CAM] grab " << i << ": " << ok << "\n";
+        // }
+
+        // std::cerr << "[CAM] before read\n";
+
+        bool success = false;
+        try {
+            success = cap->read(frame);
+        } catch (const cv::Exception& e) {
+            std::cerr << "[CAM] read exception: " << e.what() << "\n";
+            continue;
+        }
+
+        // std::cerr << "[CAM] after read: "
+        //         << success
+        //         << " empty=" << frame.empty()
+        //         << " size=" << frame.cols << "x" << frame.rows
+        //         << "\n";
+
+         if (!success || frame.empty()) {
+            failCount++;
+            // std::cerr << "[CAM] No frame (" << failCount << "/" << MAX_FAILS << ")\n";
+
+            if (failCount >= MAX_FAILS) {
+                failCount = 0;
+                if (!reconnect())
+                    std::cerr << "[CAM] No frame (" << trialCount << "/" << MAX_TRIALS << ")\n";
+                    trialCount++;
+                    if(trialCount >= MAX_TRIALS) break;
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            continue;
+        }
+        trialCount = 0; 
+        failCount = 0;
+
+        cv::Mat grayFrame;
+        cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
+
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            grayFrame.copyTo(lastFrame_);
+        }
+
+        // std::cerr << "[CAM] frame published\n";
+
+        write_frame(grayFrame);
     }
 
 }
@@ -276,11 +391,13 @@ void RtspReader::TcpReaderLoop() {
             frame.create(height_, width_, CV_8UC3);
             cv::mixChannels(&gbra_frame, 1, &frame, 1, from_to, 3);
             if (!frame.empty()) {
-                std::lock_guard<std::mutex> lock(frameMutex_);
+                
                 cv::Mat grayFrame;
                 cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
-                
-                grayFrame.copyTo(lastFrame_);
+                {
+                    std::lock_guard<std::mutex> lock(frameMutex_);
+                    grayFrame.copyTo(lastFrame_);
+                }
                 write_frame(grayFrame);
             }
         }
@@ -363,7 +480,7 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     }
 
     // 1. Skip writing if Python is actively reading to prevent corrupting the frame
-    while (!(header_->is_reading)) {
+    while (header_->is_reading) {
         std::this_thread::sleep_for(std::chrono::microseconds(10)); 
     }
 
@@ -408,4 +525,34 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     // 5. Clear is_writing flag
     // header_->is_writing.store(0, std::memory_order_release);
 
+}
+
+void RtspReader::cleanupSharedMemory() {
+    // 1. Unmap the memory pointer (if it was successfully mapped)
+    header_->is_alive = 0;
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    if (shm_ptr_ != nullptr) {
+        // TOTAL_SHM_SIZE must be the same size you used in mmap()
+        if (munmap(shm_ptr_, TOTAL_SHM_SIZE) == -1) {
+            std::cerr << "munmap failed" << std::endl;
+        }
+        shm_ptr_ = nullptr;
+        header_ = nullptr;
+        image_buffer_ = nullptr;
+    }
+
+    // 2. Close the file descriptor (if it is open)
+    if (fd_ != -1) {
+        close(fd_);
+        fd_ = -1;
+    }
+
+    // 3. Unlink the shared memory object from the system (/dev/shm/...)
+    // Only call this if your process is responsible for destroying the shared memory region.
+    if (shm_unlink(shm_name_frame_.c_str()) == -1) {
+        // It's common to ignore ENOENT (already unlinked) if multiple processes share it
+        if (errno != ENOENT) {
+            std::cerr << "shm_unlink failed" << std::endl;
+        }
+    }
 }

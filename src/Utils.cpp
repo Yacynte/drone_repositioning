@@ -17,7 +17,7 @@ void launch_python_posix(const std::string& target) {
     pid_t pid = fork();
     if (pid == 0) {
         // Child process
-        execlp("python3", "python3", "src/matches_onnx.py", "--target", target.c_str(), nullptr);
+        execlp("python3", "python3", "/home/dronetrekkers/drone_repositioning/src/matches_onnx.py", "--target", target.c_str(), nullptr);
         _exit(1); // Exits child if exec fails
     }
     // Parent C++ code continues immediately

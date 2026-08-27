@@ -14,7 +14,7 @@ target_locations = [{"x": -12000.0, "y": -5000.0, "z": 100.0},      # Central Su
                     {"x": -5000.0, "y": -8000.0, "z": 500.0}]       # 
 # target_locations1 = {"x": 0, "y": 0, "z": 0, "rel_roll": 0.0, "rel_pitch": 0.0, "rel_yaw": 0.0}
 target_locations1 = { "rel_roll": 0.0, "rel_pitch": -20.0, "rel_yaw": 10.0}
-ctrl.start_stream(True)
+# ctrl.start_stream(True)
 ctrl.start_receiving_controls()
 
 # ctrl.send_command("rotation_only")
@@ -24,10 +24,11 @@ ctrl.start_controller()
 ctrl.arrived_target = False  # Reset the flag for each new target
 # ctrl.set_location(target_locations1, target="gimbal", pose="rotationToo")
 # time.sleep(5)  # Wait for a short duration before checking the flag
-while not ctrl.arrived_target:
+i = 0
+while not ctrl.arrived_target or i < 1000:
     # Send a command to the controller script
     # ctrl._send_command("move_forward")
-    
+    i += 1
     # Wait for a short duration before sending the next command
     time.sleep(1)
 ctrl.send_command("stop")  # Stop the controller after reaching the target

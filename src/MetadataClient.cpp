@@ -537,8 +537,8 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
     // static int64 time_init = static_cast<float>(cv::getTickCount());
     // int64 time_now = static_cast<float>(cv::getTickCount());
     // double time_diff = (time_now - time_init) / cv::getTickFrequency();
-    static float minRot = 0.1f;
-    static float minTrans = 0.1f;
+    static float minRot = 1.0f;
+    static float minTrans = 1.0f;
     static bool hardStop = false;
     float roll = 0;
     // float pitch = 0;

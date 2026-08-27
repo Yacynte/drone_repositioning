@@ -359,7 +359,11 @@ public:
                   Matrix3d& R, Vector3d& t,
                   const Vector3d& t_init,
                   double& totalError) {
-        Vector3d t_dir = t_init.normalized();
+        Vector3d t_dir;
+        if (t_init.norm() < 1e-6)
+            t_dir = Vector3d::UnitZ(); // safe fallback
+        else
+            t_dir = t_init.normalized();
         solveRotation(matches, R, t_dir);
         solveTranslation(matches, R, t);
         // ── FIX 2: Cheirality Check (Resolve t sign ambiguity) ──
@@ -413,7 +417,8 @@ private:
                 Vector3d cross = m.bearing1.cross(Rf);
 
                 double sigma_sq = t_dir.dot(m.cov3d * t_dir);
-                double sigma    = std::sqrt(sigma_sq + 1e-8);
+                // double sigma    = std::sqrt(sigma_sq + 1e-8);
+                double sigma = std::max(std::sqrt(sigma_sq), 1e-3);
                 double r        = t_dir.dot(cross) / sigma;
 
                 Matrix3d skew_Rf, skew_f;
@@ -451,8 +456,8 @@ private:
             AtA += n * n.transpose();
         }
         // ── FIX 1: Normalize by N to make absolute thresholds scale-invariant ──
-        // double N = static_cast<double>(matches.size());
-        // AtA /= N;
+        double N = static_cast<double>(matches.size());
+        AtA /= N;   // eigenvalues now per-match averages
 
         // ── Guard: AtA must be valid ──────────────────────────────
         if (!R.allFinite()) {
@@ -512,8 +517,28 @@ private:
         }
         // 2. Nullspace check: λ₀ must be significantly smaller than λ₁ (e.g., at least 5x-10x smaller)
         // In your runs: λ₁ / λ₀ ≈ 76x, which is a strong pass.
-        if (lambda1 / (lambda0 + 1e-8) < 5) {
-            t = Vector3d::Zero(); // Ambiguous translation direction
+        // if (lambda1 / (lambda0 + 1e-8) < 5) {
+        //     t = Vector3d::Zero(); // Ambiguous translation direction
+        //     return;
+        // }
+        // ── 2. Conditioning check (normalized by lambda2) ─────────────────
+        // Good translation: lambda1 is a substantial fraction of lambda2
+        // Forward motion / degenerate: lambda1 collapses relative to lambda2
+        double conditioning = lambda1 / lambda2;  // always in [0, 1], stable
+        if (conditioning < 0.05) {
+            std::cout << "[pnec] Degenerate translation (conditioning=" 
+                    << conditioning << ")\n";
+            t = Vector3d::Zero();
+            return;
+        }
+
+        // ── 3. Nullspace uniqueness check ────────────────────────────────
+        // lambda0 must be clearly smaller than lambda1 (clean 1D null space)
+        double nullspace_ratio = lambda0 / (lambda1 + 1e-8);
+        if (nullspace_ratio > 0.2) {
+            std::cout << "[pnec] Ambiguous null space (ratio=" 
+                    << nullspace_ratio << ")\n";
+            t = Vector3d::Zero();
             return;
         }
         // std::cout << " [pnec Optimizer] Translation reliability: " << t_reliability << std::endl;

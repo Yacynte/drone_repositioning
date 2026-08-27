@@ -157,6 +157,7 @@ class FrameReader:
             frame = self._last_frame.copy()
 
         if self.dark_threshold > 0 and self._is_dark(frame, self.dark_threshold):
+            print(f"Frame is dark")
             return None
         return frame
 
@@ -210,7 +211,9 @@ class FrameReader:
             # Flush stale buffered frames before reading
             for _ in range(self.buffer_flush):
                 self._cap.grab()
-
+            # if not self._cap.isOpened():
+            #     print(f"Camera closed unexpectedly")
+            #     self.stop()
             ok, frame = self._cap.read()
             if not ok or frame is None or frame.size == 0:
                 continue
@@ -404,7 +407,7 @@ def set_target( target_image_path: str):
     # print(f"[Target] {target_image_path} → {target_kpts.shape[1]} keypoints cached")
 
 
-def pad_superpoint(self, kpts, desc, scores):
+def pad_superpoint(kpts, desc, scores):
         """
         Convert variable-length SuperPoint output into
         fixed-size tensors.
@@ -418,7 +421,7 @@ def pad_superpoint(self, kpts, desc, scores):
         """
 
         n = kpts.shape[1]
-        max_keypoints = self.MAX_KP_MATCHES
+        max_keypoints = 2048
         if n > max_keypoints:
             kpts = kpts[:, :max_keypoints, :]
             desc = desc[:, :max_keypoints, :]
@@ -464,25 +467,27 @@ if __name__ == "__main__":
     # --- Drone / real camera (unreal_test=False) ---
     # cap = cv2.VideoCapture("rtsp://192.168.1.1/live")
     # cap = cv2.VideoCapture(0)
-    # cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
-    # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    # cap.set(cv2.CAP_PROP_FPS, 30)
-    # reader = FrameReader("", width=1920, height=1080, unreal_test=False)
-    # reader.start(external_cap=cap)
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera")
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    reader = FrameReader("", width=1920, height=1080, unreal_test=False)
+    reader.start(external_cap=cap)
 
     # --- UE5 TCP stream (unreal_test=True, tcp URL) ---
-    reader = FrameReader("tcp://10.116.88.38:9000", width=1920, height=1080, unreal_test=True)
-    reader.start()
-
+    # reader = FrameReader("tcp://10.116.88.38:9000", width=1920, height=1080, unreal_test=True)
+    # reader.start()
+    target_image_path = "target_lab2.jpg"
     sp_session = get_session("weights/superpoint.onnx")
     lg_session = get_session("weights/lightglue_static.onnx")
-    tensor_target = set_target("groundTruths_pnec/clear/Capture_002.png")
+    tensor_target = set_target(target_image_path)
     # target_kpts, target_desc, target_scores = sp_session.run(None, {'image': tensor_target})
     (target_kpts, target_desc, target_scores, target_mask, 
                                 target_num_keypoints) = pad_superpoint(*sp_session.run(None, {'image': tensor_target}))
-
+    print(f"[Target] {target_image_path} → {target_kpts.shape[1]} keypoints cached")
     # # --- UE5 RTSP via FFmpeg (unreal_test=True, rtsp URL) ---
     # reader = FrameReader(
     #     url="rtsp://192.168.1.1/live",
@@ -499,7 +504,7 @@ if __name__ == "__main__":
     total_pipeline_time = 0.0
     try:
         if reader.is_opened():
-            while i < 200:
+            while i < 500:
                 frame = reader.get_frame()
                 if frame is not None:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
