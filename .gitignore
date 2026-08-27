@@ -10,8 +10,8 @@ include_/
 __pycache__/
 build_debug/
 data*/
-controls/images*
-controls/groundTruths
+controls/*
+!controls/*.py
 LightGlue*
 targets*
 weights/*

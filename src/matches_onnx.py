@@ -41,8 +41,8 @@ class FeatureMatcherONNX:
         self.last_processed_frame_id = -1
 
         # ── ONNX Runtime Session with TensorRT Provider ─────────────────────────
-        self.sp_session = self.get_session("weights/superpoint.onnx", provider="cuda")
-        self.lg_session = self.get_session("weights/lightglue_patched.onnx", provider="cuda")
+        self.sp_session = self.get_session("/home/user/drone_repositioning/weights/superpoint.onnx", provider="auto")
+        self.lg_session = self.get_session("/home/user/drone_repositioning/weights/lightglue_patched.onnx", provider="auto")
 
         # Extract and cache target features — call again to switch target
         self.set_target(target_image_path)

@@ -188,6 +188,7 @@ int main(int argc, char** argv) {
 
     const std::string mode = getStr(flags, "--mode", "stream");
     const std::string streamUrl = getStr(flags, "--rtsp", "rtsp://10.116.88.38:8554/mystream");
+    const std::string onnx_matches = getStr(flags, "--onnx_matches", "/home/dronetrekkers/drone_repositioning/src/matches_onnx.py");
     const char* memoryName = getStr(flags, "--memory", "/sp_sg_matches").c_str();
     const int cameraIndex = getInt(flags, "--camera", 0);
     const bool unrealTest = (getInt(flags, "--unreal", 0) != 0);
@@ -262,8 +263,8 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
     // std::cout << "To launch Python process for matches.py "<< std::endl;
     // launch_python(targetImagePath);
-    launch_python_posix(targetImagePath);
-    std::cout << "Launched Python process for matches.py with target image: " << targetImagePath << std::endl;
+    launch_python_posix(onnx_matches, targetImagePath);
+    std::cout << "Launched Python process for matches with target image: " << targetImagePath << std::endl;
     // give Python time to init models and create shm
     std::this_thread::sleep_for(std::chrono::seconds(5));
 

@@ -13,11 +13,11 @@ void launch_python(const std::string& target) {
     std::system(cmd.c_str());
 }
 
-void launch_python_posix(const std::string& target) {
+void launch_python_posix(const std::string& onnx_matches, const std::string& target) {
     pid_t pid = fork();
     if (pid == 0) {
         // Child process
-        execlp("python3", "python3", "/home/dronetrekkers/drone_repositioning/src/matches_onnx.py", "--target", target.c_str(), nullptr);
+        execlp("python3", "python3", onnx_matches.c_str() , "--target", target.c_str(), nullptr);
         _exit(1); // Exits child if exec fails
     }
     // Parent C++ code continues immediately
