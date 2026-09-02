@@ -14,11 +14,12 @@ include_directories(${OpenCV_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/include )
 # message(STATUS ${OpenCV_INCLUDE_DIRS})
 
 add_executable(ImageMatcher
-    src/main.cpp
-    src/ImageMatcher.cpp
-    src/MetadataClient.cpp
-    src/RstpReader.cpp
-    src/Utils.cpp
+    src_cpp/main.cpp
+    src_cpp/ImageMatcher.cpp
+    src_cpp/MetadataClient.cpp
+    src_cpp/RstpReader.cpp
+    src_cpp/Utils.cpp
+    src_cpp/Logger.cpp
 )
 
 target_link_libraries(ImageMatcher ${OpenCV_LIBS} Eigen3::Eigen)

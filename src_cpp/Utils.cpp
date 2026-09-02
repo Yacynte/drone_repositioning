@@ -296,9 +296,27 @@ std::string timeToUnderscoreString(int precision) {
     return s;
 }
 
+std::string timeToUnderscoreString()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
 
-// std::string timeToString() {
-//     auto now = std::chrono::system_clock::now();
-//     // {:%Y%m%d_%H%M%S} formats the time point directly
-//     std::string timestamp = fmt::format("{:%Y%m%d_%H%M%S}", now);
-// }
+    std::tm tm = *std::localtime(&time);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y_%m_%d_%H_%M_%S");
+
+    return oss.str();
+}
+
+
+std::string expandUser(const std::string& path)
+{
+    if (path.size() >= 2 && path[0] == '~' && path[1] == '/') {
+        const char* home = std::getenv("HOME");
+        if (home) {
+            return std::string(home) + path.substr(1);
+        }
+    }
+    return path;
+}

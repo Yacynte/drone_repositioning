@@ -4,6 +4,7 @@
 #include <opencv2/features2d.hpp>
 #include "Utils.h"
 #include "pnecOptimizer.hpp"
+#include "Logger.h"
 // #include <string>
 struct TrackingState {
     std::vector<cv::Point2f> prev_pts;     // Points in Frame (t-1)
@@ -23,19 +24,21 @@ struct TrackingResult {
 
 class ImageMatcher {
 public:
-
+    explicit  ImageMatcher(Logger& logger, const std::string& targetImagePath, const cv::Mat& K);
     cv::Point3f dxyz = cv::Point3f(0,0,0);
     // ImageMatcher1(const std::string& targetImagePath);
-    ImageMatcher(const std::string& targetImagePath, const cv::Mat& K);
+    
     // Returns a direction vector (dx, dy) to align input image with target
     cv::Point3f getAlignmentDisplacement(const cv::Mat& inputImage);
     cv::Point3f getAlignmentDisplacementRansac(const cv::Mat& inputImage);
     std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> getAlignmentDirection( const cv::Mat& inputImage = cv::Mat(), bool rotationOnly = false);
     // std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> getAlignment( const std::vector<cv::Point2f> newTargetMatches, bool rotationOnly = false);
     std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> getAlignmentOld( const std::vector<cv::Point2f> newInputMatches, const std::vector<cv::Point2f> newTargetMatches, bool rotationOnly = false);
-    std::tuple<cv::Mat, cv::Point3f, float, bool> getAlignment( const Matches& matchedPoints, const cv::Mat& frame );
+    std::tuple<cv::Mat, cv::Point3f, float, bool> getAlignment( const Matches& matchedPoints, const cv::Mat& frame = cv::Mat() );
 
 private:
+    Logger& logger;
+    // std::ostringstream ss;
     std::vector<cv::Matx22f> covariances;
     cv::Mat targetImageGray;
     cv::Mat inputImageGray;

@@ -67,8 +67,9 @@ int getInt(const std::unordered_map<std::string,std::string>& kv,
 
 // Convert a double to a string where the decimal point is replaced with '_'.
 // Example: 11829.695398 -> "11829_695398"
-std::string timeToUnderscoreString(int precision = 6);
-std::string timeToString();
+std::string timeToUnderscoreStringOld(int precision = 6);
+std::string timeToUnderscoreString();
+std::string expandUser(const std::string& path);
 
 cv::Mat matrix3dToMat(const Eigen::Matrix3d& R);
 cv::Mat vector3dToMat(const Eigen::Vector3d& v);

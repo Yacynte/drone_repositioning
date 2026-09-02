@@ -6,7 +6,7 @@ import argparse
 import signal
 import onnxruntime as ort
 from multiprocessing import shared_memory
-from trt_session import TRTSession
+from src_test_py.trt_session import TRTSession
 
 class FeatureMatcherONNX:
     def __init__(self, target_image_path, shm_name="single_frame_shm"):

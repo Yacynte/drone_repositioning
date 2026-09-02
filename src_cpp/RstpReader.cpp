@@ -1,7 +1,7 @@
 #include "RtspReader.h"
 
-RtspReader::RtspReader(const std::string& url, int width, int height, bool unreal_test, const char* shm_name_frame)
-    : width_(width), height_(height), unreal_test_(unreal_test), shm_name_frame_(shm_name_frame) 
+RtspReader::RtspReader(Logger& logger, const std::string& logImages, const std::string& url, int width, int height, bool unreal_test, const char* shm_name_frame)
+    : width_(width), height_(height), unreal_test_(unreal_test), shm_name_frame_(shm_name_frame), logger(logger), logImages_(logImages)
 {
     
     if (unreal_test_){
@@ -19,9 +19,17 @@ RtspReader::RtspReader(const std::string& url, int width, int height, bool unrea
             // Stream skips the whitespace
             ss >> protocol >> ip >> port_;
             port = std::stoi(port_);
-            std::cout << " [RtspReader] Connecting to " << ip << ":" << port << std::endl;
+            {
+                std::ostringstream ss;
+                ss << "Connecting to " << ip << ":" << port;
+                logger.log("RtspReader", ss.str());
+            }
             if (!RtspReader::Connect(ip, port)) {
-                std::cerr << " [RtspReader] Failed to connect to " << ip << ":" << port << std::endl;
+                {
+                    std::ostringstream ss;
+                    ss << "error: Failed to connect to " << ip << ":" << port;
+                    logger.log("RtspReader", ss.str());
+                }
             }
         }
         else{
@@ -60,7 +68,11 @@ bool RtspReader::Connect(const std::string& ip, int port)
     // 1. Create a socket (AF_INET = IPv4, SOCK_STREAM = TCP)
     client_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (client_socket == INVALID_SOCKET) {
-        std::cerr << " [RtspReader] Error at socket(): " << std::strerror(errno) << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "error: socket() failed: " << std::strerror(errno);
+            logger.log("RtspReader", ss.str());
+        }
         return false;
     }
 
@@ -72,7 +84,7 @@ bool RtspReader::Connect(const std::string& ip, int port)
     
     // Convert IP string to network address structure
     if (inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr) <= 0) {
-        std::cerr << " [RtspReader] Invalid address/Address not supported" << std::endl;
+        logger.log("RtspReader", "error: Invalid address/Address not supported");
         CloseSocket();
         return false;
     }
@@ -80,12 +92,20 @@ bool RtspReader::Connect(const std::string& ip, int port)
     // 3. Connect to the server
     int result = connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr));
     if (result == SOCKET_ERROR) {
-        std::cerr << " [RtspReader] Connection failed with error: " << std::strerror(errno) << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "error: Connection failed with error: " << std::strerror(errno);
+            logger.log("RtspReader", ss.str());
+        }
         CloseSocket();
         return false;
     }
 
-    std::cout << " [RtspReader] Successfully connected to server at " << ip << ":" << port << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Successfully connected to server at " << ip << ":" << port;
+        logger.log("RtspReader", ss.str());
+    }
     return true;
 }
 
@@ -129,21 +149,25 @@ void RtspReader::start(cv::VideoCapture* externalCap) {
     
     if(!unreal_test_){
         if(externalCap != nullptr) {
-            std::cout << " [RtspReader] Loop for Live camera " << std::endl;    
+            logger.log("RtspReader", "Loop for Live camera");
             cap = externalCap;
             running_ = true;
             thread_ = std::thread(&RtspReader::DroneReaderLoop, this);
-            std::cout << " [RtspReader] Started live image loop\n";
+            logger.log("RtspReader", "Started live image loop");
         }
         else{
-            std::cerr << " [RtspReader] Error video capture is null" << std::endl;
+            logger.log("RtspReader", "error: video capture is null");
         }
     }
     else{
         if(!ip.empty() && port > 0) {
             running_ = true;
             thread_ = std::thread(&RtspReader::TcpReaderLoop, this);
-            std::cout << " [RtspReader] Starting TCP reader loop for IP: " << ip << ", Port: " << port << std::endl;
+            {
+                std::ostringstream ss;
+                ss << "Starting TCP reader loop for IP: " << ip << ", Port: " << port;
+                logger.log("RtspReader", ss.str());
+            }
         }
         else{
             running_ = true;
@@ -154,6 +178,12 @@ void RtspReader::start(cv::VideoCapture* externalCap) {
 }
 
 void RtspReader::stop() {
+    // auto [frame, success_frame] = getFrame();
+    {
+        std::string img = logImages_ + "imageEnd" + start_time + ".png";
+        cv::imwrite(img, frame);
+    }
+
     running_ = false;
     if (unreal_test_){
             
@@ -205,7 +235,7 @@ void RtspReader::readerLoop() {
 #endif
 
     if (!pipe_) {
-        printf("ERROR: Cannot start FFmpeg process.\n");
+        logger.log("RtspReader", "error: Cannot start FFmpeg process.");
         return;
     }
 
@@ -246,33 +276,40 @@ bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
 }
 
 void RtspReader::DroneReaderLoop(){
-    std::cout << " [RtspReader] Started DroneReaderLoop\n";
+    logger.log("RtspReader", "Started DroneReaderLoop");
     int droppedFrames = 0;
     cv::Mat frame_;
     bool suc;
-    std::cout << "[RTSP Reader] test frame 0" << std::endl;
+    logger.log("RtspReader", "test frame 0");
     while (droppedFrames < 20 && cap->grab() ) {
         // std::cout << "[RTSP Reader] read frame: " << droppedFrames << std::endl;
         suc = cap->read(frame_);
         if (!suc || frame_.empty()) {
-            std::cerr << "[RTSP Reader] Failed to read frame"
-                    << " suc=" << suc
-                    << " empty=" << frame_.empty()
-                    << std::endl;
+            {
+                std::ostringstream ss;
+                ss << "error: Failed to read frame"
+                   << " suc=" << suc
+                   << " empty=" << frame_.empty();
+                logger.log("RtspReader", ss.str());
+            }
         }
         // If your loop was blocked for a while, this rapidly skips 
         // through old buffered frames to catch up to live.
         // Break early if we think we are close to live (optional heuristic)
         droppedFrames++;
     }
-    std::cout << "[RTSP Reader] test frame" << std::endl;
-    if (suc) cv::imwrite("testcpp.png", frame_);
-    else (std::cerr << "[RTSP Reader] cannot read test frame\n");
+    logger.log("RtspReader", "test frame");
+    // if (suc) {
+    //     start_time = timeToUnderscoreString();
+    //     std::string img = logImages_ + "imageStart" + start_time + ".png";
+    //     cv::imwrite(img, frame_);
+    // }
+    // else logger.log("RtspReader", "error: cannot write test frame");
 
     // std::cout << "[RtspReader] Started DroneReaderLoop\n";
 
     auto reconnect = [&]() -> bool {
-        std::cerr << "[CAM] Reconnecting to camera...\n";
+        logger.log("RtspReader", "error: Reconnecting to camera...");
         cap->release();
 
         // Wait for the device node to come back
@@ -284,7 +321,7 @@ void RtspReader::DroneReaderLoop(){
 
         cap->open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
         if (!cap->isOpened()) {
-            std::cerr << "[CAM] Reconnect failed\n";
+            logger.log("RtspReader", "error: Reconnect failed");
             return false;
         }
 
@@ -300,7 +337,7 @@ void RtspReader::DroneReaderLoop(){
         cv::Mat tmp;
         for (int i = 0; i < 10; ++i) cap->read(tmp);
 
-        std::cerr << "[CAM] Reconnected\n";
+        logger.log("RtspReader", "Reconnected");
         return true;
     };
 
@@ -310,7 +347,7 @@ void RtspReader::DroneReaderLoop(){
     int trialCount = 0;
 
     while (running_) {
-        cv::Mat frame;
+        // cv::Mat frame;
 
         // std::cerr << "[CAM] before grab\n";
 
@@ -325,7 +362,11 @@ void RtspReader::DroneReaderLoop(){
         try {
             success = cap->read(frame);
         } catch (const cv::Exception& e) {
-            std::cerr << "[CAM] read exception: " << e.what() << "\n";
+            {
+                std::ostringstream ss;
+                ss << "error: read exception: " << e.what();
+                logger.log("RtspReader", ss.str());
+            }
             continue;
         }
 
@@ -341,11 +382,16 @@ void RtspReader::DroneReaderLoop(){
 
             if (failCount >= MAX_FAILS) {
                 failCount = 0;
-                if (!reconnect())
-                    std::cerr << "[CAM] No frame (" << trialCount << "/" << MAX_TRIALS << ")\n";
+                if (!reconnect()) {
+                    {
+                        std::ostringstream ss;
+                        ss << "error: No frame (" << trialCount << "/" << MAX_TRIALS << ")";
+                        logger.log("RtspReader", ss.str());
+                    }
                     trialCount++;
                     if(trialCount >= MAX_TRIALS) break;
                     std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -356,6 +402,12 @@ void RtspReader::DroneReaderLoop(){
 
         cv::Mat grayFrame;
         cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
+        if (start_rec) {
+            start_time = timeToUnderscoreString();
+            std::string img = logImages_ + "imageStart" + start_time + ".png";
+            cv::imwrite(img, frame);
+            start_rec = false;
+        }
 
         {
             std::lock_guard<std::mutex> lock(frameMutex_);
@@ -373,7 +425,7 @@ void RtspReader::TcpReaderLoop() {
     // std::cout << "in TcpReaderLoop" << std::endl;
     while (running_) {
         // std::cout << "Waiting to receive image from TCP stream..." << std::endl;
-        cv::Mat frame;
+        
         // bool success = receiveImage(client_socket, frame);
         std::vector<uint8_t> buffer(frameSize_);
         bool success = recvAll(client_socket, buffer.data(), frameSize_);
@@ -382,7 +434,7 @@ void RtspReader::TcpReaderLoop() {
             // frame = cv::imdecode(buffer, cv::IMREAD_COLOR);
             cv::Mat gbra_frame(height_, width_, CV_8UC4, buffer.data());
             // 2. Create the destination matrix
-            cv::Mat frame;
+            // cv::Mat frame;
 
             // 3. Convert GBRA to BGR 
             // Since G=0, B=1, R=2, A=3, transforming to BGR (1,0,2) requires a custom color mix or manual channel shuffling.
@@ -391,6 +443,12 @@ void RtspReader::TcpReaderLoop() {
             frame.create(height_, width_, CV_8UC3);
             cv::mixChannels(&gbra_frame, 1, &frame, 1, from_to, 3);
             if (!frame.empty()) {
+                if (start_rec) {
+                    start_time = timeToUnderscoreString();
+                    std::string img = logImages_ + "imageStart" + start_time + ".png";
+                    cv::imwrite(img, frame);
+                    start_rec = false;
+                }
                 
                 cv::Mat grayFrame;
                 cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
@@ -451,7 +509,11 @@ void RtspReader::create_and_map_shm() {
     header_->width = WIDTH;
     header_->height = HEIGHT;
 
-    std::cout << "[SHM Writer] Single frame memory ready at " << shm_name_frame_ << "\n";
+    {
+        std::ostringstream ss;
+        ss << "[SHM Writer] Single frame memory ready at " << shm_name_frame_;
+        logger.log("RtspReader", ss.str());
+    }
 }
 
 void RtspReader::write_frame(const cv::Mat& frame) {
@@ -466,7 +528,11 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     }
     else {
         header_->is_alive = 0; // Mark as not alive due to unsupported frame type
-        std::cerr << " [SHM Writer] Unsupported frame type: " << frame.type() << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "error: [SHM Writer] Unsupported frame type: " << frame.type();
+            logger.log("RtspReader", ss.str());
+        }
         return;
     }
 
@@ -534,7 +600,7 @@ void RtspReader::cleanupSharedMemory() {
     if (shm_ptr_ != nullptr) {
         // TOTAL_SHM_SIZE must be the same size you used in mmap()
         if (munmap(shm_ptr_, TOTAL_SHM_SIZE) == -1) {
-            std::cerr << "munmap failed" << std::endl;
+            logger.log("RtspReader", "error: munmap failed");
         }
         shm_ptr_ = nullptr;
         header_ = nullptr;
@@ -552,7 +618,7 @@ void RtspReader::cleanupSharedMemory() {
     if (shm_unlink(shm_name_frame_.c_str()) == -1) {
         // It's common to ignore ENOENT (already unlinked) if multiple processes share it
         if (errno != ENOENT) {
-            std::cerr << "shm_unlink failed" << std::endl;
+            logger.log("RtspReader", "error: shm_unlink failed");
         }
     }
 }

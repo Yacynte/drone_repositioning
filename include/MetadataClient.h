@@ -16,7 +16,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
-#include "StopDetector.hpp"
+#include "Logger.h"
 
 // Define invalid socket and error check based on POSIX conventions
 #define INVALID_SOCKET -1
@@ -28,6 +28,7 @@
 class MetadataTcpClient 
 {
 private:
+    Logger& logger;
     // POSIX socket file descriptor
     int client_socket = INVALID_SOCKET;
     int server_socket = INVALID_SOCKET;
@@ -61,7 +62,8 @@ public:
     /**
      * @brief Constructor. No special initialization required for POSIX.
      */
-    MetadataTcpClient() = default;
+    // MetadataTcpClient() = default;
+    explicit MetadataTcpClient(Logger& logger);
     void CloseSocket();
 
     /**

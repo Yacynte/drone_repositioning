@@ -11,9 +11,11 @@
 #include <stdexcept>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <thread> 
 #include <chrono>
 #include <Utils.h>
+#include "Logger.h"
 
 // struct Matches {
 //     int n = 0;
@@ -29,7 +31,7 @@ public:
     static constexpr int    MAX_KP   = 512;
     static constexpr size_t SHM_SIZE = 1 + 1 + 1 + 4 + 4 + MAX_KP * (2+2+1+3) * 4;
 
-    explicit SPSGReader(const char* name = "/sp_sg_matches") {
+    explicit SPSGReader(Logger& logger, const char* name = "/sp_sg_matches"): logger(logger) {
         
         for (int i = 0; i < 600; i++){
             fd_ = shm_open(name, O_RDWR, 0666);
@@ -45,8 +47,12 @@ public:
             }
             // std::cout << "Waiting for python \n";
             if (i % 10 == 0) { // Print once every 5 seconds to reduce terminal log spam
-                std::cout << "Waiting for Python shared memory " << name 
-                          << " (Last error: " << std::strerror(errno) << ")...\n";
+                {
+                    std::ostringstream ss;
+                    ss << "Waiting for Python shared memory " << name
+                       << " (last error: " << std::strerror(errno) << ")";
+                    logger.log("SPSGReader", ss.str());
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             fd_ = shm_open(name, O_RDWR, 0666);
@@ -73,23 +79,32 @@ public:
         // const volatile uint8_t* base = static_cast<volatile uint8_t*>(ptr_);
         volatile uint8_t* data  = static_cast<volatile uint8_t*>(ptr_);
         if (data[0] == 0) {
-            std::cout << "Python shut down, exiting.\n";
+            logger.log("SPSGReader", "Python shut down, exiting.");
             return std::nullopt;
         }
         uint32_t current_id;
+        
+        // spin while WRITING flag is set
+        // Retry loop: handles the race between spin-exit and frame_id read
+        while (true) {
+            while (data[1] == 1){
+                #if defined(__x86_64__)
+                    __builtin_ia32_pause();
+                #else
+                    asm volatile("yield" ::: "memory");
+                #endif
+            }
+            memcpy(&current_id, (const uint8_t*)data + 3, 4);
+
+            // Re-check: if Python started writing while we read, retry
+            std::atomic_thread_fence(std::memory_order_acquire);  // ARM cache coherence
+            if (data[1] == 0) break;
+        }
         memcpy(&current_id, (const uint8_t*)data + 3, 4);
 
         if (current_id == last_frame_id_)
             return Matches{};   // same frame — return empty, don't print
 
-        // spin while WRITING flag is set
-        while (data[1] == 1){
-            #if defined(__x86_64__)
-                __builtin_ia32_pause();
-            #else
-                asm volatile("yield" ::: "memory");
-            #endif
-        }
         // while (data[1] == 2)  // spin while writing
         //     asm volatile("yield" ::: "memory");
 
@@ -101,7 +116,7 @@ public:
 
         data[2] = 0;
         last_frame_id_ = current_id;
-        return parse(snap.data());
+        return parse(snap.data(), logger);
     }
 
     bool stop() {
@@ -110,7 +125,7 @@ public:
         if (ptr_ != nullptr) {
             // TOTAL_SHM_SIZE must be the same size you used in mmap()
             if (munmap(ptr_, SHM_SIZE) == -1) {
-                std::cerr << "munmap failed" << std::endl;
+                logger.log("SPSGReader", "error: munmap failed");
             }
             ptr_ = nullptr;
         }
@@ -125,12 +140,13 @@ public:
     }
 
 private:
+    Logger& logger;
     int    fd_  = -1;
     void*  ptr_ = nullptr;
     Matches last_;
     uint32_t last_frame_id_ = 0;
 
-    static Matches parse(const uint8_t* p) {
+    static Matches parse(const uint8_t* p, Logger& logger) {
         Matches m;
         p += 3 + 4;                                      // skip flag
         memcpy(&m.n, p, 4);  p += 4;
@@ -146,6 +162,11 @@ private:
         memcpy(m.scores.data(), p, m.n * sizeof(float)); p += m.n * sizeof(float);
         memcpy(m.covariances.data(), p, m.n * sizeof(cv::Point3f));
         m.newMatches = true;
+        {
+            std::ostringstream ss;
+            ss << "Number of matches obtained: " << m.n;
+            logger.log("SPSGReader", ss.str());
+        }
         return m;
     }
 };

@@ -5,6 +5,8 @@
 #include <mutex>
 #include <vector>
 #include <cstdio>
+#include "Logger.h"
+#include "Utils.h"
 
 // --- POSIX Sockets Headers ---
 #include <sys/socket.h> // For socket(), connect(), send(), etc.
@@ -31,7 +33,8 @@
 
 class RtspReader {
 public:
-    RtspReader(const std::string& url, int width, int height, bool unreal_test = 0, 
+    explicit RtspReader(Logger& logger, const std::string& logImages, const std::string& url, 
+                int width, int height, bool unreal_test = 0, 
                 const char* shm_name_frame = "/single_frame_shm" );
     ~RtspReader();
 
@@ -56,8 +59,13 @@ public:
     static constexpr size_t TOTAL_SHM_SIZE = sizeof(Header) + FRAME_SIZE;
 
 private:
+    Logger& logger;
+    std::string start_time; 
+    std::string logImages_;
     bool frameMemoryReady_ = false;
     std::string shm_name_frame_;
+    bool start_rec = true;
+    cv::Mat frame;
     int fd_{-1};
     uint8_t* shm_ptr_{nullptr};
     Header* header_{nullptr};

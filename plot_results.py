@@ -198,7 +198,7 @@ def main():
     print(f"🔍 Searching for log files in {repo_root}...")
     
     # Get MotionLog files (ground truth)
-    motion_int = 3  # Specify the lab number for GT file
+    motion_int = 5  # Specify the lab number for GT file
     # Look for GT (ground truth) file
     gt_int = 2
     motion_logs = sorted(list(repo_root.glob(f'results_pnec/clear/Results_MotionLog_*.csv')))

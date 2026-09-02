@@ -26,10 +26,10 @@ class FeatureMatcherONNX:
         
         try:
             self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES)
-            print(f"[Attached] {self.SHM_NAME_MATCHES}")
+            # print(f"[Attached] {self.SHM_NAME_MATCHES}")
         except FileNotFoundError:
             self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES, create=True, size=self.SHM_SIZE_MATCHES)
-            print(f"[Created] {self.SHM_NAME_MATCHES}")
+            # print(f"[Created] {self.SHM_NAME_MATCHES}")
         
         self.buf = self.shm.buf
         self.buf[0] = 1 
@@ -95,8 +95,8 @@ class FeatureMatcherONNX:
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
-        print("[FeatureMatcher] Available:", available)
-        print("[FeatureMatcher] Requested:", providers)
+        # print("[FeatureMatcher] Available:", available)
+        # print("[FeatureMatcher] Requested:", providers)
 
         session = ort.InferenceSession(
             model_path,
@@ -104,7 +104,7 @@ class FeatureMatcherONNX:
             providers=providers,
         )
 
-        print("[FeatureMatcher] Active:", session.get_providers())
+        # print("[FeatureMatcher] Active:", session.get_providers())
         return session
 
 
@@ -117,7 +117,7 @@ class FeatureMatcherONNX:
 
         (self.target_kpts, self.target_desc, self.target_scores, self.target_mask, 
                             self.target_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': tensor}))
-        print(f"[Target] {target_image_path} → {self.target_kpts.shape[1]} keypoints cached")
+        # print(f"[Target] {target_image_path} → {self.target_kpts.shape[1]} keypoints cached")
 
     def pad_superpoint(self, kpts, desc, scores):
         """
@@ -293,7 +293,7 @@ class FeatureMatcherONNX:
                                             cur_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': cur_tensor}))
                 # kpts0, desc0, scores0 = self._pad_features(kpts0_, desc0_, scores0_)
                 # Step 2: match against cached target features
-                print(f"[FeatureMatcher] Keypoints found : {cur_num_keypoints}")
+                # print(f"[FeatureMatcher] Keypoints found : {cur_num_keypoints}")
                 outputs = self.lg_session.run(None, {
                     'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
                     'kpts1':   self.target_kpts, 'desc1':   self.target_desc, 'scores1': self.target_scores })
@@ -324,7 +324,7 @@ class FeatureMatcherONNX:
                 mkpts1[:, 1] *= self.ratio_height
 
                 mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
-                print(f"[FeatureMatcher] matches found: {len(scores)}")
+                # print(f"[FeatureMatcher] matches found: {len(scores)}")
                 covariances = self._compute_patch_covariances_numpy(cur_image_, mkpts0_filtered)
                 self._write_matches(mkpts0_filtered, mkpts1_filtered, scores_filtered, covariances)
 
@@ -352,7 +352,7 @@ class FeatureMatcherONNX:
         self.buf[offset:offset + N*4] = mscores.tobytes(); offset += N*4
         self.buf[offset:offset + N*12] = covariances.tobytes()
         self.buf[1] = 0
-        print(f"Wrote matches to shared memory")
+        # print(f"Wrote matches to shared memory")
 
     def _cleanup(self):
         self.shm_frames.close()

@@ -139,7 +139,8 @@ float rotationCompensatedZoom(
 //     std::cout << "Target keypoints size: " << targetKeypoints.size() << std::endl;
 // }
 
-ImageMatcher::ImageMatcher(const std::string& targetImagePath, const cv::Mat& K_cv) {
+ImageMatcher::ImageMatcher(Logger& logger, const std::string& targetImagePath, const cv::Mat& K_cv): logger(logger)
+{
     cameraMatrix = K_cv.clone();
     cv::Mat K_64;
     K_cv.convertTo(K_64, CV_64F);
@@ -151,8 +152,11 @@ ImageMatcher::ImageMatcher(const std::string& targetImagePath, const cv::Mat& K_
         throw std::runtime_error("Could not load target image");
     }
     cv::cvtColor(target, targetImageGray, cv::COLOR_BGR2GRAY);
-    std::cout << "Target image size: " << targetImageGray.cols << "x" << targetImageGray.rows << std::endl;
-
+    {
+        std::ostringstream ss;
+        ss << "Target image size: " << targetImageGray.cols << "x" << targetImageGray.rows;
+        logger.log("ImageMatcher", ss.str());
+    }
 }
 
 void ImageMatcher::detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
@@ -199,7 +203,11 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image, std::vector<cv::Ke
     // cv::Mat ImageDesc;
     sift->compute(image, keypoints, descriptors);
     // ImageDesc.convertTo(descriptors, CV_32F);
-    std::cout << "All Keypoints detected: " << keypoints.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "All Keypoints detected: " << keypoints.size();
+        logger.log("ImageMatcher", ss.str());
+    }
 }
 
 
@@ -215,11 +223,23 @@ cv::Point3f ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     // matcher->match(inputDescriptors, targetDescriptors, matches);
 
     std::vector<cv::DMatch> goodMatches;
-    std::cout << "Target image keypoint size: " << targetKeypoints.size() << std::endl;
-    std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Target image keypoint size: " << targetKeypoints.size();
+        logger.log("ImageMatcher", ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "Input image keypoint size: " << inputKeypoints.size();
+        logger.log("ImageMatcher", ss.str());
+    }
     goodMatches = goodMatcher(inputDescriptors);
     // goodMatches = gridFilterMatches(matches, inputKeypoints);
-    std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Found good matches of size: " << goodMatches.size();
+        logger.log("ImageMatcher", ss.str());
+    }
     if (goodMatches.empty()) return cv::Point3f(0,0,0);
     
     cv::Point2f direction2D(0,0);
@@ -262,7 +282,11 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
     // std::vector<std::vector<cv::DMatch>> matchesBA;
     // matcherFlann.knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
     // matcher->knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
-    std::cout << "Total matches found: " << matchesAB.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Total matches found: " << matchesAB.size();
+        logger.log("ImageMatcher", ss.str());
+    }
     // std::cout << "Target descriptors size: " << targetDescriptors.rows << std::endl;
     // std::cout << "Input descriptors size: " << inputDescriptors.rows << std::endl;  
     // Apply Lowe's ratio test and cross-check
@@ -274,7 +298,11 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
         if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
             goodAB.push_back(m[0]);
     }
-    std::cout << "Good matches after ratio test: " << goodAB.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Good matches after ratio test: " << goodAB.size();
+        logger.log("ImageMatcher", ss.str());
+    }
     return goodAB;
     // for (const auto& m : matchesBA){
     //     if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
@@ -412,7 +440,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     // inputImageGray.copyTo(oldImageGray);
 
     if(inputMatches.size() < 50){
-        std::cout << " Not enough Matches found (atleast 50)" << std::endl;
+        logger.log("ImageMatcher", "Not enough Matches found (atleast 50)");
         return {rotationMatrix, world_direction, flow, meanError, false};
     }
     bool rotationOnlyFlag = false;
@@ -431,9 +459,18 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     if (foe.residual > 10) rotationOnlyFlag = true;
     if (rotationOnly) rotationOnlyFlag = true;
 
-    std::cout << "FOE: (" << foe.point.x << ", " << foe.point.y << "), residual: " << foe.residual << ", rotation only: " << rotationOnlyFlag << std::endl;
-
-    std::cout << "Homography inliers: " << hInliers << ", Essential inliers: " << eInliers << ", tau_H: " << tau_H << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "FOE: (" << foe.point.x << ", " << foe.point.y << "), residual: " << foe.residual
+           << ", rotation only: " << rotationOnlyFlag;
+        logger.log("ImageMatcher", ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "Homography inliers: " << hInliers << ", Essential inliers: " << eInliers
+           << ", tau_H: " << tau_H;
+        logger.log("ImageMatcher", ss.str());
+    }
 
     // H = [ s*cosθ  -s*sinθ  tx ]
     //     [ s*sinθ   s*cosθ  ty ]
@@ -487,7 +524,11 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
         // std::cout << "Estimated translation matrix: " << std::endl << bestT << std::endl;
         // std::cout << "world direction: " << world_direction << std::endl;
     }
-    std::cout << "Estimated translation magnitude (mean error): " << meanError << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Estimated translation magnitude (mean error): " << meanError;
+        logger.log("ImageMatcher", ss.str());
+    }
   
     return {rotationMatrix, world_direction, flow, meanError, true};
 }
@@ -784,7 +825,11 @@ cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlier
     std::vector<int> validSolutions;
     cv::filterHomographyDecompByVisibleRefpoints(Rs, normals, inlierInput, inlierTarget, validSolutions);
 
-    std::cout << "Valid homography solutions: " << validSolutions.size() << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Valid homography solutions: " << validSolutions.size();
+        logger.log("ImageMatcher", ss.str());
+    }
     if (!validSolutions.empty()) {
         // Pick solution with roll closest to 0
         cv::Mat bestR;
@@ -803,13 +848,21 @@ cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlier
                 bestR = Rs[idx];
             }
         }
-        std::cout << "shape of bestR: " << bestR.size() << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "shape of bestR: " << bestR.size();
+            logger.log("ImageMatcher", ss.str());
+        }
         cv::Point3f delta_cv = rotmatToYPRDeg_XYZ(bestR);
-        std::cout << "[PASS 1 - pure rotation] inliers: " << hInliers
-                    << " ratio: " << inlierRatio
-                    << " roll: " << delta_cv.z
-                    << " yaw: " << delta_cv.x
-                    << " pitch: " << delta_cv.y << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "[PASS 1 - pure rotation] inliers: " << hInliers
+               << " ratio: " << inlierRatio
+               << " roll: " << delta_cv.z
+               << " yaw: " << delta_cv.x
+               << " pitch: " << delta_cv.y;
+            logger.log("ImageMatcher", ss.str());
+        }
 
         // return cv::Point3f(-delta_cv.y, -delta_cv.x, 0.0f); // remap to Unreal, roll=0
         // return cv::Point3f(delta_cv.x, delta_cv.y, 0.0f);
@@ -839,10 +892,14 @@ cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlier
     double angleRad = std::atan2(b, a);
     double angleDeg = angleRad * 180.0 / CV_PI;
 
-    std::cout << "[PASS 2 - affine fallback] inliers: " << aInliers
-              << " angle: " << angleDeg
-              << " tx: "    << tx
-              << " ty: "    << ty << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "[PASS 2 - affine fallback] inliers: " << aInliers
+           << " angle: " << angleDeg
+           << " tx: " << tx
+           << " ty: " << ty;
+        logger.log("ImageMatcher", ss.str());
+    }
 
     // tx/ty in pixels → convert to approximate degrees using focal length
     double fx = cameraMatrix.at<float>(0, 0);
@@ -966,7 +1023,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     // inputImageGray.copyTo(oldImageGray);
 
     if(newTargetMatches.size() < 50){
-        std::cout << " Not enough Matches found (atleast 50)" << std::endl;
+        logger.log("ImageMatcher", "Not enough Matches found (atleast 50)");
         return {rotationMatrix, world_direction, flow, meanError, false};
     }
     bool rotationOnlyFlag = rotationOnly;
@@ -985,9 +1042,18 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     if (foe.residual > 10) rotationOnlyFlag = true;
     if (rotationOnly) rotationOnlyFlag = true;
 
-    std::cout << "FOE: (" << foe.point.x << ", " << foe.point.y << "), residual: " << foe.residual << ", rotation only: " << rotationOnlyFlag << std::endl;
-
-    std::cout << "Homography inliers: " << hInliers << ", Essential inliers: " << eInliers << ", tau_H: " << tau_H << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "FOE: (" << foe.point.x << ", " << foe.point.y << "), residual: " << foe.residual
+           << ", rotation only: " << rotationOnlyFlag;
+        logger.log("ImageMatcher", ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "Homography inliers: " << hInliers << ", Essential inliers: " << eInliers
+           << ", tau_H: " << tau_H;
+        logger.log("ImageMatcher", ss.str());
+    }
 
     // H = [ s*cosθ  -s*sinθ  tx ]
     //     [ s*sinθ   s*cosθ  ty ]
@@ -1041,14 +1107,18 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
         // std::cout << "Estimated translation matrix: " << std::endl << bestT << std::endl;
         // std::cout << "world direction: " << world_direction << std::endl;
     }
-    std::cout << "Estimated translation magnitude (mean error): " << meanError << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Estimated translation magnitude (mean error): " << meanError;
+        logger.log("ImageMatcher", ss.str());
+    }
   
     return {rotationMatrix, world_direction, flow, meanError, true};
 }
 
 std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const Matches& matchedPoints, const cv::Mat& frame){
 
-    pnec::RelativePoseEstimatorOld estimator(K);
+    pnec::RelativePoseEstimatorOld estimator(logger, K);
 
     if(!matchedPoints.newMatches && !frame.empty()){
         TrackingResult trackingResult = track_features(frame, targetImageGray, targetMatches_);
@@ -1068,17 +1138,20 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
         inputMatches = matchedPoints.kpts0;
         targetMatches = matchedPoints.kpts1;
         targetMatches_ = matchedPoints.kpts1;
-        for(auto cov : matchedPoints.covariances){
-            cv::Matx22f H(cov.x, cov.y, cov.y, cov.z);
-        
-            // Inverse Hessian = 2D Covariance Matrix Sigma_2D
-            covariances.push_back(H.inv(cv::DECOMP_SVD));
+        if(matchedPoints.n > 8){
+            for(auto cov : matchedPoints.covariances){
+                cv::Matx22f H(cov.x, cov.y, cov.y, cov.z);
+            
+                // Inverse Hessian = 2D Covariance Matrix Sigma_2D
+                covariances.push_back(H.inv(cv::DECOMP_SVD));
+            }
         }
+        else return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
         // covariances = matchedPoints.covariances;
     }
     std::vector<pnec::MatchData> matches;
     Eigen::Matrix3d K_inv = K.inverse();
-    pnec::UnscentedTransform ut;
+    pnec::UnscentedTransform ut(logger);
 
     // std::cout << "Camera Intrinsics K:\n" << K << std::endl;
     // std::cout << "Camera Intrinsics K_inv:\n" << K_inv << std::endl;
@@ -1141,7 +1214,7 @@ TrackingResult ImageMatcher::track_features(const cv::Mat& img_prev, const cv::M
     TrackingResult result;
 
     if (pts_next.empty()) {
-        std::cout << "Warning: pts_next is empty!" << std::endl;
+        logger.log("ImageMatcher", "Warning: pts_next is empty!");
         return result;
     }
 
@@ -1201,7 +1274,11 @@ TrackingResult ImageMatcher::track_features(const cv::Mat& img_prev, const cv::M
         }
     }
 
-    std::cout << "Input points: " << num_pts << " | Valid tracked points: " << valid_count << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Input points: " << num_pts << " | Valid tracked points: " << valid_count;
+        logger.log("ImageMatcher", ss.str());
+    }
     return result;
 }
 

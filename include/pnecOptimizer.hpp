@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include <memory>
+#include "Logger.h"
 
 namespace pnec {
 
@@ -41,6 +42,7 @@ struct OptimizationResult {
 
 class CovarianceEstimator {
 public:
+    explicit CovarianceEstimator(Logger& logger): logger(logger){} 
     /**
      * Estimate 2D pixel covariance from LightGlue confidence.
      * 
@@ -65,6 +67,9 @@ public:
         Matrix2d cov_2d = Matrix2d::Identity() * (std_dev * std_dev);
         return cov_2d;
     }
+
+private:
+    Logger& logger;
 };
 
 // ============================================================================
@@ -79,6 +84,7 @@ public:
      * This is the most expensive operation but crucial for accuracy.
      * We use eigendecomposition to generate sigma points.
      */
+    explicit UnscentedTransform(Logger& logger): logger(logger){}
     Matrix3d propagate2DTo3D(const Matrix2d& cov_2d,
                                     const Matrix3d& K) {
         // Unscented transform parameters
@@ -137,223 +143,16 @@ public:
         
         return cov_3d;
     }
+
+private:
+    Logger& logger;
 };
 
-// // ============================================================================
-// // STEP 3: PNEC RESIDUAL FOR CERES
-// // ============================================================================
-
-// struct PNECResidual {
-//     Vector3d bearing1;      // f in frame 1
-//     Vector3d bearing2;      // f' in frame 2
-//     Matrix3d cov_3d;        // 3D covariance
-//     Vector3d t;             // Translation (known)
-    
-//     PNECResidual(const Vector3d& f, const Vector3d& f_prime,
-//                  const Matrix3d& cov, const Vector3d& trans)
-//         : bearing1(f), bearing2(f_prime), cov_3d(cov), t(trans) {}
-    
-//     /**
-//      * Compute residual for given rotation (angle-axis parameterization).
-//      * 
-//      * Energy: E = sum_i (e_i^2 / sigma_i^2)
-//      * 
-//      * Jacobian is auto-computed by Ceres.
-//      */
-//     template <typename T>
-//     bool operator()(const T* const angle_axis_array,
-//                    T* residuals) const {
-//         // Unpack rotation from angle-axis
-//         Eigen::Map<const Eigen::Matrix<T, 3, 1>> angle_axis(angle_axis_array);
-        
-//         // Avoid division by zero for small angles
-//         T angle = angle_axis.norm();
-//         Eigen::Matrix<T, 3, 3> R;
-        
-//         if (angle > T(1e-10)) {
-//             Eigen::AngleAxis<T> aa(angle, angle_axis / angle);
-//             R = aa.matrix();
-//         } else {
-//             // Use first-order approximation for small angles
-//             R = Eigen::Matrix<T, 3, 3>::Identity() +
-//                 skewSymmetric(angle_axis);
-//         }
-        
-//         // Convert data to working type T
-//         Eigen::Matrix<T, 3, 1> f_t = bearing1.cast<T>();
-//         Eigen::Matrix<T, 3, 1> f_p_t = bearing2.cast<T>();
-//         Eigen::Matrix<T, 3, 1> t_t = t.cast<T>();
-//         Eigen::Matrix<T, 3, 3> cov_t = cov_3d.cast<T>();
-        
-//         // Epipolar error: e = t^T * (f x R*f')
-//         Eigen::Matrix<T, 3, 1> Rf = R * f_p_t;
-//         Eigen::Matrix<T, 3, 1> cross = f_t.cross(Rf);
-//         T e = t_t.dot(cross);
-        
-//         // Uncertainty scaling: sigma^2 = t^T * Sigma * t
-//         Eigen::Matrix<T, 3, 1> Sigma_t = cov_t * t_t;
-//         T sigma_sq = t_t.dot(Sigma_t);
-        
-//         // Weighted residual (add epsilon to avoid division by zero)
-//         T eps = T(1e-8);
-//         residuals[0] = e / (T(std::sqrt(double(sigma_sq) + eps)));
-        
-//         return true;
-//     }
-    
-// private:
-//     template <typename T>
-//     static Eigen::Matrix<T, 3, 3> skewSymmetric(const Eigen::Matrix<T, 3, 1>& v) {
-//         Eigen::Matrix<T, 3, 3> result = Eigen::Matrix<T, 3, 3>::Zero();
-//         result(0, 1) = -v(2);
-//         result(0, 2) = v(1);
-//         result(1, 0) = v(2);
-//         result(1, 2) = -v(0);
-//         result(2, 0) = -v(1);
-//         result(2, 1) = v(0);
-//         return result;
-//     }
-// };
-
-// ============================================================================
-// STEP 4: MAIN PNEC OPTIMIZER
-// ============================================================================
-
-// class PNECOptimizer {
-// public:
-//     /**
-//      * Initialize PNEC optimizer.
-//      * 
-//      * @param K Camera intrinsic matrix (3x3)
-//      * @param base_std Base standard deviation for covariance estimation
-//      */
-//     explicit PNECOptimizer(const Matrix3d& K = Matrix3d::Identity(),
-//                            double base_std = 0.5)
-//         : K_(K), base_std_(base_std) {}
-    
-//     /**
-//      * Main optimization function.
-//      * 
-//      * Takes matched bearing pairs with LightGlue confidence,
-//      * computes covariances, and optimizes rotation using PNEC.
-//      * 
-//      * @param matches Vector of MatchData structures
-//      * @param t Translation vector (unit direction)
-//      * @param verbose Print optimization progress
-//      * @return OptimizationResult with rotation and diagnostics
-//      */
-//     OptimizationResult optimize(const std::vector<MatchData>& matches,
-//                                 const Vector3d& t,
-//                                 bool verbose = false) {
-//         OptimizationResult result;
-        
-//         if (matches.size() < 3) {
-//             result.success = false;
-//             result.final_cost = std::numeric_limits<double>::infinity();
-//             return result;
-//         }
-        
-//         // Pre-compute 3D covariances
-//         std::vector<Matrix3d> covariances_3d;
-//         covariances_3d.reserve(matches.size());
-        
-//         for (const auto& match : matches) {
-//             Matrix2d cov_2d = 
-//                 CovarianceEstimator::estimateFromConfidence(
-//                     match.confidence, base_std_);
-//             Matrix3d cov_3d = 
-//                 UnscentedTransform::propagate2DTo3D(cov_2d, K_);
-//             covariances_3d.push_back(cov_3d);
-//         }
-        
-//         // Setup Ceres problem
-//         ceres::Problem problem;
-//         double angle_axis[3] = {0.0, 0.0, 0.0};  // Identity rotation
-        
-//         // Add residual blocks
-//         for (size_t i = 0; i < matches.size(); ++i) {
-//             const auto& match = matches[i];
-//             const auto& cov_3d = covariances_3d[i];
-            
-//             ceres::CostFunction* cost_function =
-//                 new ceres::AutoDiffCostFunction<PNECResidual, 1, 3>(
-//                     new PNECResidual(match.bearing1, match.bearing2, 
-//                                     cov_3d, t));
-            
-//             problem.AddResidualBlock(cost_function, nullptr, angle_axis);
-//         }
-        
-//         // Solver options
-//         ceres::Solver::Options options;
-//         options.linear_solver_type = ceres::DENSE_QR;
-//         options.minimizer_progress_to_stdout = verbose;
-//         options.max_num_iterations = 100;
-//         options.function_tolerance = 1e-8;
-//         options.gradient_tolerance = 1e-8;
-//         options.parameter_tolerance = 1e-8;
-        
-//         // Solve
-//         ceres::Solver::Summary summary;
-//         ceres::Solve(options, &problem, &summary);
-        
-//         // Extract rotation from angle-axis
-//         AngleAxisd aa(angle_axis[0], angle_axis[1], angle_axis[2]);
-//         result.rotation = aa.matrix();
-//         result.final_cost = summary.final_cost;
-//         result.num_iterations = summary.iterations.size();
-//         result.success = summary.IsSolutionUsable();
-        
-//         // Compute residuals for diagnostics
-//         std::vector<double> residuals_vec;
-//         computeResiduals(matches, covariances_3d, result.rotation, t, 
-//                         residuals_vec);
-//         result.residuals = residuals_vec;
-        
-//         return result;
-//     }
-    
-//     /**
-//      * Fast version: compute residuals without optimizing.
-//      * Useful for diagnostic/validation.
-//      */
-//     void computeResiduals(const std::vector<MatchData>& matches,
-//                          const std::vector<Matrix3d>& covariances_3d,
-//                          const Matrix3d& R,
-//                          const Vector3d& t,
-//                          std::vector<double>& residuals) {
-//         residuals.clear();
-//         residuals.reserve(matches.size());
-        
-//         for (size_t i = 0; i < matches.size(); ++i) {
-//             const auto& match = matches[i];
-//             const auto& cov_3d = covariances_3d[i];
-            
-//             // Epipolar error
-//             Vector3d Rf = R * match.bearing2;
-//             Vector3d cross = match.bearing1.cross(Rf);
-//             double e = t.dot(cross);
-            
-//             // Uncertainty scaling
-//             Vector3d Sigma_t = cov_3d * t;
-//             double sigma_sq = t.dot(Sigma_t);
-            
-//             // Residual
-//             double residual = e / std::sqrt(sigma_sq + 1e-8);
-//             residuals.push_back(residual);
-//         }
-//     }
-
-    
-    
-// private:
-//     Matrix3d K_;        // Camera intrinsics
-//     double base_std_;   // Base standard deviation for covariance
-// };
 
 
 class RelativePoseEstimatorOld {
 public:
-    explicit RelativePoseEstimatorOld(const Matrix3d& K) : K_(K) {}
+    explicit RelativePoseEstimatorOld( Logger& logger, const Matrix3d& K) : K_(K), logger(logger) {}
 
     void estimate(const std::vector<MatchData>& matches,
                   Matrix3d& R, Vector3d& t,
@@ -375,6 +174,8 @@ public:
     }
 
 private:
+
+    Logger& logger;
     Matrix3d K_;
 
     void solveRotation(const std::vector<MatchData>& matches, Matrix3d& R, const Vector3d& t_dir) 
@@ -461,7 +262,11 @@ private:
 
         // ── Guard: AtA must be valid ──────────────────────────────
         if (!R.allFinite()) {
-            std::cout << "[pnec] R is not finite:\n" << R << "\n";
+            {
+                std::ostringstream ss;
+                ss << "error: R is not finite:\n" << R;
+                logger.log("pnec", ss.str());
+            }
             t = Vector3d::Zero();
             // t_reliability = 0.0;
             return;
@@ -469,7 +274,7 @@ private:
         if (!AtA.allFinite()) {
             t = Vector3d::Zero();
             // t_reliability = 0.0;
-            std::cout << "[pnec] AtA not finite\n";
+            logger.log("pnec", "error: AtA not finite");
             return;
         }
         Eigen::SelfAdjointEigenSolver<Matrix3d> solver(AtA);
@@ -477,14 +282,18 @@ private:
         if (solver.info() != Eigen::Success) {
             t = Vector3d::Zero();
             // t_reliability = 0.0;
-            std::cout << "[pnec] Eigensolver failed\n";
+            logger.log("pnec", "error: Eigensolver failed");
             return;
         }
 
         Vector3d eigenvalues = solver.eigenvalues();
 
         // ── Print for debugging ───────────────────────────────────
-        std::cout << "[pnec] eigenvalues: " << eigenvalues.transpose() << "\n";
+        {
+            std::ostringstream ss;
+            ss << "[pnec] eigenvalues: " << eigenvalues.transpose();
+            logger.log("pnec", ss.str());
+        }
 
 
         // Vector3d eigenvalues = solver.eigenvalues();
@@ -526,8 +335,11 @@ private:
         // Forward motion / degenerate: lambda1 collapses relative to lambda2
         double conditioning = lambda1 / lambda2;  // always in [0, 1], stable
         if (conditioning < 0.05) {
-            std::cout << "[pnec] Degenerate translation (conditioning=" 
-                    << conditioning << ")\n";
+            {
+                std::ostringstream ss;
+                ss << "error: Degenerate translation (conditioning=" << conditioning << ")";
+                logger.log("pnec", ss.str());
+            }
             t = Vector3d::Zero();
             return;
         }
@@ -536,8 +348,11 @@ private:
         // lambda0 must be clearly smaller than lambda1 (clean 1D null space)
         double nullspace_ratio = lambda0 / (lambda1 + 1e-8);
         if (nullspace_ratio > 0.2) {
-            std::cout << "[pnec] Ambiguous null space (ratio=" 
-                    << nullspace_ratio << ")\n";
+            {
+                std::ostringstream ss;
+                ss << "error: Ambiguous null space (ratio=" << nullspace_ratio << ")";
+                logger.log("pnec", ss.str());
+            }
             t = Vector3d::Zero();
             return;
         }
@@ -545,7 +360,11 @@ private:
 
         t = solver.eigenvectors().col(0);
         t = t.normalized();
-        std::cout << " [pnec translation Optimizer] Translation: " << t << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "[pnec translation Optimizer] Translation: " << t;
+            logger.log("pnec", ss.str());
+        }
     }
 
     // ── FIX 2 Helper: Depth test for Cheirality ──
@@ -604,7 +423,7 @@ private:
 
 class RelativePoseEstimator {
 public:
-    explicit RelativePoseEstimator(const Matrix3d& K) : K_(K) {}
+    explicit RelativePoseEstimator(Logger& logger, const Matrix3d& K) : K_(K), logger(logger) {}
 
     void estimate(const std::vector<MatchData>& matches,
                   Matrix3d& R, Vector3d& t,
@@ -639,7 +458,7 @@ public:
 
 private:
     Matrix3d K_;
-
+    Logger& logger;
     void solveRotation(const std::vector<MatchData>& matches, Matrix3d& R, const Vector3d& t_dir) 
     {
         double lambda = 1e-3; // FIX 4: Levenberg-Marquardt / Tikhonov damping factor

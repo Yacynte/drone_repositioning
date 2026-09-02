@@ -4,12 +4,14 @@
 #include "AlgoLogger.hpp"
 #include "Utils.h"
 #include "Matches.hpp"
+#include "Logger.h"
 
 #include <opencv2/opencv.hpp>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,11 +28,12 @@ constexpr int kReprojectWindowSize = 10;
 bool openCapture(const std::string& mode,
                  const std::string& streamUrl,
                  int cameraIndex,
-                 cv::VideoCapture& cap) {
+                 cv::VideoCapture& cap,
+                 Logger& appLogger) {
     if (mode == "live") {
 
         auto reconnect = [&]() -> bool {
-            std::cerr << "[CAM] Reconnecting to camera...\n";
+            appLogger.log("main", "error: [CAM] Reconnecting to camera...");
             cap.release();
 
             // Wait for the device node to come back
@@ -42,7 +45,7 @@ bool openCapture(const std::string& mode,
 
             cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
             if (!cap.isOpened()) {
-                std::cerr << "[CAM] Reconnect failed\n";
+                appLogger.log("main", "error: [CAM] Reconnect failed");
                 return false;
             }
 
@@ -58,38 +61,58 @@ bool openCapture(const std::string& mode,
             cv::Mat tmp;
             for (int i = 0; i < 10; ++i) cap.read(tmp);
 
-            std::cerr << "[CAM] Reconnected\n";
+            appLogger.log("main", "[CAM] Reconnected");
             return true;
         };
         // int indices[] = {cameraIndex, cameraIndex == 0 ? 1 : 0};
         std::string device = "/dev/video" + std::to_string(cameraIndex);
         if (!std::filesystem::exists(device)){ 
-        std::cout << "[Camera] file " << device << " does not exist\n";
+            {
+                std::ostringstream ss;
+                ss << "[Camera] file " << device << " does not exist";
+                appLogger.log("main", ss.str());
+            }
             cameraIndex = (cameraIndex == 0) ? 1 : 0;
         }
 
         cap.release();
 
         // for (int index : indices) {
-        std::cout << "[Camera] Trying /dev/video" << cameraIndex << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "[Camera] Trying /dev/video" << cameraIndex;
+            appLogger.log("main", ss.str());
+        }
 
         // cap.release();
 
         if (cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2)) {
-            std::cout << "[Camera] Opened /dev/video"<< cameraIndex << std::endl;
+            {
+                std::ostringstream ss;
+                ss << "[Camera] Opened /dev/video" << cameraIndex;
+                appLogger.log("main", ss.str());
+            }
             // break;
         }
-        else{std::cerr << "[Camera] Failed to open /dev/video"<< cameraIndex << std::endl;}
+        else{
+            std::ostringstream ss;
+            ss << "error: [Camera] Failed to open /dev/video" << cameraIndex;
+            appLogger.log("main", ss.str());
+        }
 
         // }
 
         // cap.open(preferredIndex, cv::CAP_V4L2);
         if (!cap.isOpened()) {
-            std::cerr << "Warning: cv::CAP_V4L2 failed, trying default backend..." << std::endl;
+            appLogger.log("main", "error: Warning: cv::CAP_V4L2 failed, trying default backend...");
             if (!cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0")) return false;
         }
-        std::cout << "Camera opened successfully\n";
-        std::cout << "Backend: " << cap.getBackendName() << "\n";
+        appLogger.log("main", "Camera opened successfully");
+        {
+            std::ostringstream ss;
+            ss << "Backend: " << cap.getBackendName();
+            appLogger.log("main", ss.str());
+        }
         cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
         cap.set(cv::CAP_PROP_FRAME_WIDTH, 1920);
         cap.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
@@ -97,7 +120,7 @@ bool openCapture(const std::string& mode,
         cap.set(cv::CAP_PROP_BUFFERSIZE, 4);
 
         // Same as time.sleep(1.0)
-        std::cout << "Warming up sensor...\n";
+        appLogger.log("main", "Warming up sensor...");
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
         cv::Mat frame;
@@ -111,13 +134,21 @@ bool openCapture(const std::string& mode,
                 try {
                     success = cap.read(frame);
                 } catch (const cv::Exception& e) {
-                    std::cerr << "[CAM] read exception: " << e.what() << "\n";
+                    {
+                        std::ostringstream ss;
+                        ss << "error: [CAM] read exception: " << e.what();
+                        appLogger.log("main", ss.str());
+                    }
                     continue;
                 }
 
                 if (!success || frame.empty()) {
                     failCount++;
-                    std::cerr << "[CAM] No frame (" << failCount << "/" << MAX_FAILS << ")\n";
+                    {
+                        std::ostringstream ss;
+                        ss << "error: [CAM] No frame (" << failCount << "/" << MAX_FAILS << ")";
+                        appLogger.log("main", ss.str());
+                    }
 
                     if (failCount >= MAX_FAILS) {
                         failCount = 0;
@@ -137,10 +168,12 @@ bool openCapture(const std::string& mode,
                 //         << "\n";
             }
             catch (const cv::Exception& e) {
-                std::cerr << "Exception during warmup frame "
-                        << i << ":\n"
-                        << e.what() << "\n";
-                        return false;
+                {
+                    std::ostringstream ss;
+                    ss << "error: Exception during warmup frame " << i << ": " << e.what();
+                    appLogger.log("main", ss.str());
+                }
+                return false;
             }
         }
         return true;
@@ -154,7 +187,11 @@ bool openCapture(const std::string& mode,
         // }
         // Retry loop until the stream is successfully opened
         while (!cap.isOpened()) {
-            std::cout << "Waiting for stream to be available: " << streamUrl << std::endl;
+            {
+                std::ostringstream ss;
+                ss << "Waiting for stream to be available: " << streamUrl;
+                appLogger.log("main", ss.str());
+            }
             
             // Explicitly call open with CAP_FFMPEG on every retry iteration
             cap.open(streamUrl, cv::CAP_FFMPEG);
@@ -188,8 +225,8 @@ int main(int argc, char** argv) {
 
     const std::string mode = getStr(flags, "--mode", "stream");
     const std::string streamUrl = getStr(flags, "--rtsp", "rtsp://10.116.88.38:8554/mystream");
-    const std::string onnx_matches = getStr(flags, "--onnx_matches", "/home/dronetrekkers/drone_repositioning/src/matches_onnx.py");
-    const char* memoryName = getStr(flags, "--memory", "/sp_sg_matches").c_str();
+    const std::string onnx_matches = expandUser(getStr(flags, "--onnx_matches", "~/drone_repositioning/src_py/matches_onnx.py"));
+    const std::string memoryName = getStr(flags, "--memory", "/sp_sg_matches");
     const int cameraIndex = getInt(flags, "--camera", 0);
     const bool unrealTest = (getInt(flags, "--unreal", 0) != 0);
 
@@ -198,31 +235,46 @@ int main(int argc, char** argv) {
     const std::string msgIp = getStr(flags, "--relay_ip", "0.0.0.0");
     const int msgPort = getInt(flags, "--relay_port", 9010);
 
-    const std::string logPath = getStr(flags, "--log", "../data/");
+    const std::string logPath = expandUser(getStr(flags, "--log", "~/drone_repositioning/data/"));
     const std::string targetImagePath = getStr(flags, "--target", "../target.png");
     const int imgHeight = getInt(flags, "--imgHeight", 1080);
     const int imgWidth = getInt(flags, "--imgWidth", 1920);
+    const int timer = getInt(flags, "--timer", 180);
 
     // bool hardStop = false;
 
-    std::cout << "[mode] " << mode << "\n";
-    std::cout << "[net] cmd=" << cmdIp << ":" << cmdPort
-              << " msg=" << msgIp << ":" << msgPort << "\n";
+    // Application logger for human-readable runtime logs.
 
     // Ensure log directory exists before creating the logger.
     const std::filesystem::path logDirectory = std::filesystem::path(logPath);
     if (!logDirectory.empty() && !std::filesystem::exists(logDirectory)) {
         std::filesystem::create_directories(logDirectory);
     }
-
+    const std::filesystem::path logImages = std::filesystem::path(logPath + "images/");
+    if (!logImages.empty() && !std::filesystem::exists(logImages)) {
+        std::filesystem::create_directories(logImages);
+    }
     // Create a CSV logger for runtime data and command history.
-    const std::string logFile = logPath + "AlgoLog_" + timeToUnderscoreString() + ".csv";
-    AlgoLogger logger(logFile, /*write_header=*/true, /*flush_every_n=*/30);
+    const std::string logData = logPath + "dataLog_" + timeToUnderscoreString() + ".csv";
+    AlgoLogger algoLogger(logData, /*write_header=*/true, /*flush_every_n=*/30);
 
+    const std::string logFile = logPath + "log_" + timeToUnderscoreString() + ".txt";
+    Logger appLogger(logFile);
+    appLogger.log("main", std::string("[mode] ") + mode);
+    {
+        std::ostringstream ss;
+        ss << "[net] cmd=" << cmdIp << ":" << cmdPort
+           << " msg=" << msgIp << ":" << msgPort;
+        appLogger.log("main", ss.str());
+    }
     // Start the metadata command and relay connections.
-    MetadataTcpClient client;
+    MetadataTcpClient client(appLogger);
     if (!client.StartConnectionHandlerUDP(cmdIp, cmdPort, "command_handler")) {
-        std::cerr << "Failed to start command handler. Ensure port " << cmdPort << " is available." << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "error: Failed to start command handler. Ensure port " << cmdPort << " is available.";
+            appLogger.log("main", ss.str());
+        }
         return -1;
     }
     client.startReceiver();
@@ -235,22 +287,30 @@ int main(int argc, char** argv) {
 
     // Open the selected video source and set the requested resolution.
     cv::VideoCapture cap;
-    if (!openCapture(mode, streamUrl, cameraIndex, cap)) {
-        std::cerr << "Error: Cannot open input source for mode '" << mode << "'." << std::endl;
+    if (!openCapture(mode, streamUrl, cameraIndex, cap, appLogger)) {
+        {
+            std::ostringstream ss;
+            ss << "error: Cannot open input source for mode '" << mode << "'.";
+            appLogger.log("main", ss.str());
+        }
         return -1;
     }
 
     // cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
     // cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
     if (!cap.isOpened() && !(streamUrl.find("tcp") != std::string::npos)) {
-        std::cerr << "Error: Cannot open camera/stream" << std::endl;
+        appLogger.log("main", "error: Cannot open camera/stream");
         return -1;
     }
-    std::cout << "Camera/Stream opened" << std::endl;
+    appLogger.log("main", "Camera/Stream opened");
 
     // Create the RTSP reader and start it, using Unreal mode if configured.
-    RtspReader reader(streamUrl, imgWidth, imgHeight, unrealTest);
-    std::cout << "Unreal test: " << unrealTest << std::endl;
+    RtspReader reader(appLogger, logImages, streamUrl, imgWidth, imgHeight, unrealTest);
+    {
+        std::ostringstream ss;
+        ss << "Unreal test: " << unrealTest;
+        appLogger.log("main", ss.str());
+    }
     if (unrealTest) {
         reader.start();
     } else {
@@ -264,20 +324,32 @@ int main(int argc, char** argv) {
     // std::cout << "To launch Python process for matches.py "<< std::endl;
     // launch_python(targetImagePath);
     launch_python_posix(onnx_matches, targetImagePath);
-    std::cout << "Launched Python process for matches with target image: " << targetImagePath << std::endl;
+    {
+        std::ostringstream ss;
+        ss << "Launched Python process for matches with target image: " << targetImagePath;
+        appLogger.log("main", ss.str());
+    }
     // give Python time to init models and create shm
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    SPSGReader matchesReader;
-    std::cout << "Matches reader initialized with shared memory: " << memoryName << std::endl;
+    SPSGReader matchesReader(appLogger);
+    {
+        std::ostringstream ss;
+        ss << "Matches reader initialized with shared memory: " << memoryName;
+        appLogger.log("main", ss.str());
+    }
         
     cv::Mat cameraMatrix = (cv::Mat_<float>(3,3) << 
                     imgWidth / 2.0f, 0,            imgWidth / 2.0f,
                     0,            imgWidth / 2.0f, imgHeight / 2.0f,
                     0,            0,            1.0f);
     // Load the target image matcher used for alignment estimation.
-    ImageMatcher matcher(targetImagePath, cameraMatrix);
-    std::cout << "Image matcher initialized with target image: " << targetImagePath << std::endl;
+    ImageMatcher matcher(appLogger, targetImagePath, cameraMatrix);
+    {
+        std::ostringstream ss;
+        ss << "Image matcher initialized with target image: " << targetImagePath;
+        appLogger.log("main", ss.str());
+    }
     // cv::Mat frame;
     // std::vector<int> directionHistory;
     std::vector<float> reprojectErrors;
@@ -290,21 +362,29 @@ int main(int argc, char** argv) {
     // double oldMeanError = std::numeric_limits<double>::infinity();
 
     // Main repositioning loop: wait for start, process frames, and send commands.
-    while (true) {
-        if (client.stopRepositioning.load() || complete) {
-            std::cout << "Received command to stop repositioning or arrived at target" << std::endl;
+    double start_time = AlgoLogger::nowWallSec();
+    while (!complete) {
+        double currentTime = AlgoLogger::nowWallSec();
+        if (client.stopRepositioning.load()) {
+            appLogger.log("main", "Received command to stop repositioning");
             std::stringstream ss;
-            ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
-            std::string data_to_send = ss.str();
-            if (!client.SendMetadata(data_to_send)){
-                std::cout << "Could not send Stop command \n";
-            }
             // reader.sendStopSignal();
             break;
         }
+        if (currentTime - start_time > timer){
+            if (hasStarted){
+                appLogger.log("main", "Drone Repositioning Timed Out");
+                std::stringstream ss;
+                // reader.sendStopSignal();
+                complete = true;
+                break;
+            }
+            else {start_time = AlgoLogger::nowWallSec();}
+        }
+        
 
         if (!client.startRepositioning.load() && !hasStarted) {
-            std::cout << "Waiting to start the repositioning system" << std::endl;
+            appLogger.log("main", "Waiting to start the repositioning system");
             usleep(1000 * 1000);
             continue;
         }
@@ -318,10 +398,10 @@ int main(int argc, char** argv) {
         // }
 
         while (client.pauseRepositioning.load()){
-            std::cout << "Received command to pause repositioning" << std::endl;
+            appLogger.log("main", "Received command to pause repositioning");
             usleep(1000 * 100);
             if (client.resumeRepositioning.load() || client.stopRepositioning.load()) {
-                std::cout << "Resuming repositioning" << std::endl;
+                appLogger.log("main", "Resuming repositioning");
                 break;
             }
         }
@@ -338,7 +418,7 @@ int main(int argc, char** argv) {
 
         auto result = matchesReader.read();
         if (!result.has_value()) {
-                std::cout << "Python shut down, exiting.\n";
+                appLogger.log("main", "Python shut down, exiting.");
                 break;
             }
         Matches matches = result.value();
@@ -362,7 +442,7 @@ int main(int argc, char** argv) {
         // std::cout << "direction: x=" << direction.x << " y=" << direction.y << " z=" << direction.z << std::endl;
         
         if(hasNaNRot) {
-            std::cerr << "Warning: NaN detected in rotation or translation vector, skipping this frame." << std::endl;
+            appLogger.log("main", "error: NaN detected in rotation or translation vector, skipping this frame.");
             continue;
         }
         float transError = transError_;
@@ -372,9 +452,9 @@ int main(int argc, char** argv) {
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
             std::string data_to_send = ss.str();
             if (!client.SendMetadata(data_to_send)){
-                std::cout << "Could not send Stop command \n";
+                appLogger.log("main", "error: Could not send Stop command");
             }
-            std::cerr << "Warning: GetAlignmentDirection failed." << std::endl;
+            appLogger.log("main", "error: GetAlignmentDirection failed.");
             continue;
         }
         
@@ -399,9 +479,21 @@ int main(int argc, char** argv) {
         // cmdVx = kVelocitySmoothing * cmdVx + (1.0f - kVelocitySmoothing) * lastCmdVx;
         // angleRateCmd = kVelocitySmoothing * angleRateCmd + (1.0f - kVelocitySmoothing) * lastAngleRate;
 
-        std::cout << "rotation: x=" << rotation.x << " y=" << rotation.y << " z=" << rotation.z << std::endl;
-        std::cout << "translation: x=" << translation.x << " y=" << translation.y << " z=" << translation.z << std::endl;
-        std::cout << "transError: " << transError << std::endl;
+        {
+            std::ostringstream ss;
+            ss << "rotation: x=" << rotation.x << " y=" << rotation.y << " z=" << rotation.z;
+            appLogger.log("main", ss.str());
+        }
+        {
+            std::ostringstream ss;
+            ss << "translation: x=" << translation.x << " y=" << translation.y << " z=" << translation.z;
+            appLogger.log("main", ss.str());
+        }
+        {
+            std::ostringstream ss;
+            ss << "transError: " << transError;
+            appLogger.log("main", ss.str());
+        }
         
         
         std::string dataToSend;
@@ -410,9 +502,9 @@ int main(int argc, char** argv) {
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
             std::string data_to_send = ss.str();
             if (!client.SendMetadata(data_to_send)){
-                std::cout << "Could not send Stop command \n";
+                appLogger.log("main", "error: Could not send Stop command");
             }
-            std::cout << "Arrived at target" << std::endl;
+            appLogger.log("main", "Arrived at target");
             atTarget = true;
             if (arrivalTime == 0.0) arrivalTime = AlgoLogger::nowWallSec();
         }
@@ -421,16 +513,16 @@ int main(int argc, char** argv) {
             arrivalTime = 0.0;
         }
 
-        double currentTime = AlgoLogger::nowWallSec();
+        currentTime = AlgoLogger::nowWallSec();
         
         if (atTarget && ((currentTime - arrivalTime > 1.0) ) && arrivalTime > 0.0) {
-            std::cout << "Maintained target position for 2 seconds, stopping repositioning" << std::endl;
+            appLogger.log("main", "Maintained target position for 2 seconds, stopping repositioning");
             std::string dataToSend;
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
             std::string data_to_send = ss.str();
             if (!client.SendMetadata(data_to_send)){
-                std::cout << "Could not send Stop command \n";
+                appLogger.log("main", "error: Could not send Stop command");
             }
             complete = true;
         }
@@ -438,7 +530,7 @@ int main(int argc, char** argv) {
         // Log the command and error values for later analysis.
         const auto parsed = AlgoLogger::parseCommand6(dataToSend);
         auto unit_vect = translation / transError;
-        logger.log(currentTime, transError, rotation, unit_vect, parsed);
+        algoLogger.log(currentTime, transError, rotation, unit_vect, parsed);
 
     }
     matchesReader.stop();
