@@ -236,10 +236,11 @@ int main(int argc, char** argv) {
     const int msgPort = getInt(flags, "--relay_port", 9010);
 
     const std::string logPath = expandUser(getStr(flags, "--log", "~/drone_repositioning/data/"));
-    const std::string targetImagePath = getStr(flags, "--target", "../target.png");
+    std::string targetImagePath = getStr(flags, "--target", "../target.png");
     const int imgHeight = getInt(flags, "--imgHeight", 1080);
     const int imgWidth = getInt(flags, "--imgWidth", 1920);
     const int timer = getInt(flags, "--timer", 180);
+    const int targetImageIndex = getInt(flags, "--targetIndex", -1);
 
     // bool hardStop = false;
 
@@ -323,6 +324,11 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
     // std::cout << "To launch Python process for matches.py "<< std::endl;
     // launch_python(targetImagePath);
+    if (targetImageIndex != -1){
+        // Construct the filename using the index: e.g., "camera0.png"    
+        targetImagePath =  expandUser("~/drone_repositioning/targets/") + "targetImage" + std::to_string(targetImageIndex) + ".jpg";
+    }
+
     launch_python_posix(onnx_matches, targetImagePath);
     {
         std::ostringstream ss;
