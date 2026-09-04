@@ -31,7 +31,7 @@ else:
     else:
         print("Failed to grab frame. Check if another process is using /dev/video0.")
 
-for i in range(1000):
+for i in range(1):
     ret, frame = cap.read()
     if not ret:
         print("Failed to grab frame")
