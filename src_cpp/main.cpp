@@ -27,10 +27,12 @@ constexpr int kReprojectWindowSize = 10;
 // Open either a local camera or remote stream depending on the selected mode.
 bool openCapture(const std::string& mode,
                  const std::string& streamUrl,
-                 int cameraIndex,
+                 int t,
                  cv::VideoCapture& cap,
                  Logger& appLogger) {
     if (mode == "live") {
+
+        std::string device = "/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0"
 
         auto reconnect = [&]() -> bool {
             appLogger.log("main", "error: [CAM] Reconnecting to camera...");
@@ -43,7 +45,7 @@ bool openCapture(const std::string& mode,
             //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
             // }
 
-            cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
+            cap.open(device, cv::CAP_V4L2);
             if (!cap.isOpened()) {
                 appLogger.log("main", "error: [CAM] Reconnect failed");
                 return false;
@@ -65,14 +67,13 @@ bool openCapture(const std::string& mode,
             return true;
         };
         // int indices[] = {cameraIndex, cameraIndex == 0 ? 1 : 0};
-        std::string device = "/dev/video" + std::to_string(cameraIndex);
+        // std::string device = "/dev/video" + std::to_string(cameraIndex);
         if (!std::filesystem::exists(device)){ 
             {
                 std::ostringstream ss;
                 ss << "[Camera] file " << device << " does not exist";
                 appLogger.log("main", ss.str());
             }
-            cameraIndex = (cameraIndex == 0) ? 1 : 0;
         }
 
         cap.release();
@@ -80,102 +81,117 @@ bool openCapture(const std::string& mode,
         // for (int index : indices) {
         {
             std::ostringstream ss;
-            ss << "[Camera] Trying /dev/video" << cameraIndex;
+            ss << "[Camera] Trying " << device;
             appLogger.log("main", ss.str());
         }
 
         // cap.release();
-
-        if (cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2)) {
+        if(reconnect()) {
             {
                 std::ostringstream ss;
-                ss << "[Camera] Opened /dev/video" << cameraIndex;
+                ss << "[Camera] Opened " << device;
                 appLogger.log("main", ss.str());
             }
-            // break;
-        }
-        else{
-            std::ostringstream ss;
-            ss << "error: [Camera] Failed to open /dev/video" << cameraIndex;
-            appLogger.log("main", ss.str());
+            // Same as time.sleep(1.0)
+            appLogger.log("main", "Warming up sensor...");
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
-        // }
-
-        // cap.open(preferredIndex, cv::CAP_V4L2);
-        if (!cap.isOpened()) {
-            appLogger.log("main", "error: Warning: cv::CAP_V4L2 failed, trying default backend...");
-            if (!cap.open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0")) return false;
-        }
-        appLogger.log("main", "Camera opened successfully");
-        {
-            std::ostringstream ss;
-            ss << "Backend: " << cap.getBackendName();
-            appLogger.log("main", ss.str());
-        }
-        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
-        cap.set(cv::CAP_PROP_FRAME_WIDTH, 1920);
-        cap.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
-        cap.set(cv::CAP_PROP_FPS, 30);
-        cap.set(cv::CAP_PROP_BUFFERSIZE, 4);
-
-        // Same as time.sleep(1.0)
-        appLogger.log("main", "Warming up sensor...");
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        
 
         cv::Mat frame;
 
-        // Same as the Python warmup loop
+        constexpr int WARMUP_GOOD_FRAMES = 10;
+        constexpr int MAX_FAILS = 100;
+
+        int goodFrames = 0;
         int failCount = 0;
-        const int MAX_FAILS = 1;
-        for (int i = 0; i < 10; ++i) {
-            try {
-                bool success = false;
-                try {
-                    success = cap.read(frame);
-                } catch (const cv::Exception& e) {
-                    {
-                        std::ostringstream ss;
-                        ss << "error: [CAM] read exception: " << e.what();
-                        appLogger.log("main", ss.str());
-                    }
-                    continue;
-                }
 
-                if (!success || frame.empty()) {
-                    failCount++;
-                    {
-                        std::ostringstream ss;
-                        ss << "error: [CAM] No frame (" << failCount << "/" << MAX_FAILS << ")";
-                        appLogger.log("main", ss.str());
-                    }
+        const auto startTime = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::seconds(t);
 
-                    if (failCount >= MAX_FAILS) {
-                        failCount = 0;
-                        if (!reconnect())
-                            std::this_thread::sleep_for(std::chrono::seconds(2));
-                    } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-                    continue;
-                }
+        while (goodFrames < WARMUP_GOOD_FRAMES) {
+            // Check timeout first
+            const auto elapsed = std::chrono::steady_clock::now() - startTime;
 
-                failCount = 0;
-
-                // std::cout << "Warmup frame " << i
-                //         << ": ret=" << ret
-                //         << ", empty=" << frame.empty()
-                //         << "\n";
-            }
-            catch (const cv::Exception& e) {
-                {
-                    std::ostringstream ss;
-                    ss << "error: Exception during warmup frame " << i << ": " << e.what();
-                    appLogger.log("main", ss.str());
-                }
+            if (elapsed >= timeout) {
+                appLogger.log(
+                    "main",
+                    "[CAM] Warmup timeout reached"
+                );
                 return false;
             }
+
+            bool success = false;
+
+            try {
+                success = cap.read(frame);
+            }
+            catch (const cv::Exception& e) {
+                std::ostringstream ss;
+                ss << "[CAM] read exception: " << e.what();
+                appLogger.log("main", ss.str());
+            }
+
+            // ---------------------------------------------------------
+            // Bad frame
+            // ---------------------------------------------------------
+            if (!success || frame.empty()) {
+                ++failCount;
+
+                {
+                    std::ostringstream ss;
+                    ss << "[CAM] Bad frame ("
+                    << failCount << "/" << MAX_FAILS << ")";
+                    appLogger.log("main", ss.str());
+                }
+
+                // Too many consecutive failures
+                if (failCount >= MAX_FAILS) {
+                    appLogger.log(
+                        "main",
+                        "[CAM] Maximum consecutive failures reached"
+                    );
+
+                    return false;
+                }
+
+                // Try to reconnect
+                if (!reconnect()) {
+                    appLogger.log(
+                        "main",
+                        "[CAM] Reconnect failed, retrying..."
+                    );
+
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(100)
+                    );
+                }
+
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // Good frame
+            // ---------------------------------------------------------
+            ++goodFrames;
+            failCount = 0;
+
+            {
+                std::ostringstream ss;
+                ss << "[CAM] Warmup frame "
+                << goodFrames << "/"
+                << WARMUP_GOOD_FRAMES;
+                appLogger.log("main", ss.str());
+            }
         }
+
+        appLogger.log(
+            "main",
+            "[CAM] Camera warmup completed successfully"
+        );
+
+        return true;
         return true;
     }
 
@@ -288,7 +304,7 @@ int main(int argc, char** argv) {
 
     // Open the selected video source and set the requested resolution.
     cv::VideoCapture cap;
-    if (!openCapture(mode, streamUrl, cameraIndex, cap, appLogger)) {
+    if (!openCapture(mode, streamUrl, timer, cap, appLogger)) {
         {
             std::ostringstream ss;
             ss << "error: Cannot open input source for mode '" << mode << "'.";
