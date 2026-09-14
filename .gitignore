@@ -13,7 +13,8 @@ data*/
 controls/*
 !controls/*.py
 LightGlue*
-targets_sim*
+# targets_sim*
 weights/*
 !weights/lightglue_patched.onnx
 !weights/superpoint.onnx
+!controls/logData4
