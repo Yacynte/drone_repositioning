@@ -17,12 +17,12 @@ class RTSPController:
     def _send(self, command, target, params):
         data = {"command": command, "target": target, "params": params}
         message = json.dumps(data).encode('utf-8')
-        print(f"Sending to drone: {data}")
+        # print(f"Sending to drone: {data}")
         self.sock_drone.sendto(message, self.address_drone)
 
     def _send_command(self, command: str):
         """Send a command to the controller script."""
-        print(f"Sending command to controller: {command}")
+        # print(f"Sending command to controller: {command}")
         message = command + "\n"  # Add newline to indicate end of command
         self.sock_controller.sendto(message.encode('utf-8'), self.address_controller)
 
@@ -35,15 +35,15 @@ class RTSPController:
                 data, _ = self.sock_controller.recvfrom(1024)
                 # Clean the message (remove newlines and extra whitespace)
                 message = data.decode('utf-8').strip()
-                print(f"Received from controller: {message}")
+                # print(f"Received from controller: {message}")
                 # Split by comma
                 values = message.split(',')
-                target = "gimbal"
+                target = "drone"
                 if int(values[6]) == -1:
                     # self.arrived_target = True arrived
                     target = "arrived"
-                if int(values[6]) == 1:
-                    target = "drone"
+                if int(values[6]) == 0:
+                    target = "gimbal"
                 params = {"roll": float(values[0]), "pitch": float(values[1]), "yaw": float(values[2]), "x": float(values[3]), "y": float(values[4]), "z": float(values[5])}
                 self.set_location_relative(**params, target=target)
                 if int(values[6]) == -1:
@@ -68,10 +68,9 @@ class RTSPController:
             self.thread.join()
             print("Background receiver stopped.")
 
-    def set_location(self, x: float=0.0, y: float=0.0, z: float=0.0, yaw: float=0.0, pitch: float=0.0, roll: float=0.0, 
+    def set_location(self, x: float=0.0, y: float=0.0, z: float=0.0, yaw: float=0.0, pitch: float=0.0, roll: float=0.0,
                      rel_yaw: float=0.0, rel_pitch: float=0.0, rel_roll: float=0.0, target="drone", pose = "transOnly"):
-        params = {"x": x, "y": y, "z": z, "roll": roll, "pitch": pitch, "yaw": yaw, 
-                  "rel_yaw": rel_yaw, "rel_pitch": rel_pitch, "rel_roll": rel_roll, "pose": pose}
+        params = {"x": x, "y": y, "z": z, "roll": roll, "pitch": pitch, "yaw": yaw, "rel_roll": rel_roll, "rel_pitch": rel_pitch, "rel_yaw": rel_yaw, "pose": pose}
         self._send("location", target, params)
 
     def set_location_relative(self, x: float=0.0, y: float=0.0, z: float=0.0, roll: float=0.0, 
