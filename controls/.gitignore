@@ -12,4 +12,4 @@ data/*
 !data/groundTruths4/**
 
 # Ignore logs completely
-logs*
+/logs*
