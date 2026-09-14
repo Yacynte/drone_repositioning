@@ -1,6 +1,5 @@
 #pragma once
 
-// #include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <vector>
@@ -8,6 +7,21 @@
 #include <memory>
 #include "Logger.h"
 
+// Hand-rolled (no Ceres dependency) relative-pose solver based on the Probabilistic
+// Normal Epipolar Constraint (PNEC): given bearing-vector correspondences with
+// per-match 2D pixel covariances (propagated to 3D by UnscentedTransform below), it
+// iteratively refines rotation R and translation direction t via Gauss-Newton on the
+// covariance-weighted epipolar residual, then recovers t's sign with a cheirality
+// (positive-depth) check.
+//
+// NOTE for whoever picks this up next: there are two pose-estimator classes below.
+// RelativePoseEstimatorOld is the one actually wired into the live pipeline
+// (ImageMatcher::getAlignment(), the entry point main.cpp calls every frame).
+// RelativePoseEstimator is a later, more robust rewrite (adds a Huber loss, an
+// alternating R/t optimization loop, and Levenberg-Marquardt damping — see the "FIX"
+// comments in its solveRotation()/estimate()) but is currently unused. Swapping
+// getAlignment() over to RelativePoseEstimator looks like unfinished work worth
+// evaluating before treating RelativePoseEstimatorOld as final.
 namespace pnec {
 
 using Vector2d = Eigen::Vector2d;
@@ -21,13 +35,16 @@ using MatrixXd = Eigen::MatrixXd;
 // STRUCTURES FOR DATA PASSING
 // ============================================================================
 
+// One point correspondence fed into the pose estimators below: a pair of unit
+// bearing vectors (K_inv * pixel, normalized) and the 3D uncertainty of that match.
 struct MatchData {
     Vector3d bearing1;      // Bearing vector in frame 1
     Vector3d bearing2;      // Bearing vector in frame 2
-    // double confidence;      // LightGlue confidence [0, 1]
     Matrix3d cov3d;         // 3D covariance from unscented transform
 };
 
+// Richer result type for a solve, currently unused — estimate() below returns its
+// outputs via reference params (R, t, totalError) instead.
 struct OptimizationResult {
     Matrix3d rotation;      // Estimated 3x3 rotation matrix
     double final_cost;      // Final optimization cost
@@ -40,9 +57,13 @@ struct OptimizationResult {
 // STEP 1: COVARIANCE ESTIMATION FROM CONFIDENCE
 // ============================================================================
 
+// Alternative ways to estimate per-match 2D covariance from a match-quality score
+// instead of image gradients. Currently unused — the live pipeline instead estimates
+// covariances directly from local image gradients (see
+// ImageMatcher::compute_point_covariances) and feeds those into UnscentedTransform.
 class CovarianceEstimator {
 public:
-    explicit CovarianceEstimator(Logger& logger): logger(logger){} 
+    explicit CovarianceEstimator(Logger& logger): logger(logger){}
     /**
      * Estimate 2D pixel covariance from LightGlue confidence.
      * 
@@ -76,11 +97,15 @@ private:
 // STEP 2: UNSCENTED TRANSFORM (2D -> 3D PROPAGATION)
 // ============================================================================
 
+// Propagates a per-keypoint 2D pixel covariance through the (nonlinear) unprojection
+// K_inv * [u, v, 1] into a 3D bearing-vector covariance, via the unscented transform
+// (sigma points) rather than a linearized Jacobian. Used live by
+// ImageMatcher::getAlignment() to build each MatchData::cov3d.
 class UnscentedTransform {
 public:
     /**
      * Propagate 2D covariance through unprojection to get 3D covariance.
-     * 
+     *
      * This is the most expensive operation but crucial for accuracy.
      * We use eigendecomposition to generate sigma points.
      */
@@ -150,10 +175,20 @@ private:
 
 
 
+// PNEC relative-pose solver: given bearing correspondences with 3D covariances,
+// solves for rotation R and translation direction t by (1) one Gauss-Newton pass
+// refining R against the covariance-weighted epipolar residual using t_init as the
+// fixed translation direction, (2) recovering t as the null-space eigenvector of the
+// weighted essential-matrix normal equations, then (3) flipping t's sign if
+// cheirality (positive depth) disagrees. This is the estimator currently used by
+// ImageMatcher::getAlignment() — see the file-level note above for the newer,
+// unused RelativePoseEstimator alternative.
 class RelativePoseEstimatorOld {
 public:
     explicit RelativePoseEstimatorOld( Logger& logger, const Matrix3d& K) : K_(K), logger(logger) {}
 
+    // R is refined in place (used as the initial guess too); t and totalError are
+    // outputs. t_init seeds the translation direction used while solving for R.
     void estimate(const std::vector<MatchData>& matches,
                   Matrix3d& R, Vector3d& t,
                   const Vector3d& t_init,
@@ -178,41 +213,16 @@ private:
     Logger& logger;
     Matrix3d K_;
 
-    void solveRotation(const std::vector<MatchData>& matches, Matrix3d& R, const Vector3d& t_dir) 
+    // Gauss-Newton refinement of R (fixing t_dir), minimizing the covariance-weighted
+    // epipolar residual t_dir . (bearing1 x R*bearing2) over up to 10 iterations.
+    void solveRotation(const std::vector<MatchData>& matches, Matrix3d& R, const Vector3d& t_dir)
     {
-        // // ── Check inputs ──────────────────────────────────────────
-        // if (!R.allFinite()) {
-        //     std::cout << "[pnec] R_init is not finite\n";
-        //     return;
-        // }
-        // if (!t_dir.allFinite() || t_dir.norm() < 1e-8) {
-        //     std::cout << "[pnec] t_dir is not finite or zero: " << t_dir.transpose() << "\n";
-        //     return;
-        // }
-        // if (matches.empty()) {
-        //     std::cout << "[pnec] no matches\n";
-        //     return;
-        // }
-
         for (int iter = 0; iter < 10; iter++) {
             Matrix3d JtJ = Matrix3d::Zero();
             Vector3d Jtr = Vector3d::Zero();
 
-            // for (const auto& m : matches) {
             for (int i = 0; i < matches.size(); i++) {
                 const auto& m = matches[i];
-
-                // // ── Check each match ──────────────────────────────
-                // if (!m.bearing1.allFinite() || !m.bearing2.allFinite()) {
-                //     std::cout << "[pnec] match " << i << " bearing not finite\n"
-                //             << "  b1: " << m.bearing1.transpose() << "\n"
-                //             << "  b2: " << m.bearing2.transpose() << "\n";
-                //     continue;
-                // }
-                // if (!m.cov3d.allFinite()) {
-                //     std::cout << "[pnec] match " << i << " cov3d not finite\n";
-                //     continue;
-                // }
 
                 Vector3d Rf    = R * m.bearing2;
                 Vector3d cross = m.bearing1.cross(Rf);
@@ -238,16 +248,15 @@ private:
 
             Vector3d delta = JtJ.ldlt().solve(-Jtr);
 
-            // if (verbose)
-            //     std::cout << "iter " << iter
-            //               << "  delta=" << delta.norm()
-            //               << "  sampson=" << total_error / matches.size() << "\n";
-
-            if (delta.norm() < 1e-6) break; // ✓ check before update
+            if (delta.norm() < 1e-6) break; // converged
             R = Eigen::AngleAxisd(delta.norm(), delta.normalized()).matrix() * R;
         }
     }
 
+    // Solves for the translation direction t as the eigenvector of the smallest
+    // eigenvalue of AtA = sum(n * n^T), n = bearing1 x (R * bearing2) — the classic
+    // 8-point-style null-space solve, with several degeneracy guards (near-pure-
+    // rotation / ambiguous null space) that zero out t rather than return garbage.
     void solveTranslation(const std::vector<MatchData>& matches,
                           const Matrix3d& R,
                           Vector3d& t) {
@@ -268,12 +277,10 @@ private:
                 logger.log("pnec", ss.str());
             }
             t = Vector3d::Zero();
-            // t_reliability = 0.0;
             return;
         }
         if (!AtA.allFinite()) {
             t = Vector3d::Zero();
-            // t_reliability = 0.0;
             logger.log("pnec", "error: AtA not finite");
             return;
         }
@@ -281,55 +288,27 @@ private:
 
         if (solver.info() != Eigen::Success) {
             t = Vector3d::Zero();
-            // t_reliability = 0.0;
             logger.log("pnec", "error: Eigensolver failed");
             return;
         }
 
         Vector3d eigenvalues = solver.eigenvalues();
-
-        // ── Print for debugging ───────────────────────────────────
         {
             std::ostringstream ss;
             ss << "[pnec] eigenvalues: " << eigenvalues.transpose();
             logger.log("pnec", ss.str());
         }
 
-
-        // Vector3d eigenvalues = solver.eigenvalues();
-
-        // Ratio of smallest to second smallest eigenvalue
         // Eigenvalues sorted ascending: λ₀ ≤ λ₁ ≤ λ₂
         double lambda0 = eigenvalues(0);  // should be near 0 (null space)
         double lambda1 = eigenvalues(1);  // should be >> 0 for good translation
         double lambda2 = eigenvalues(2);  // largest eigenvalue
 
-        // Good translation: λ₁ is large → gap is large
-        // Pure rotation:    λ₁ ≈ 0     → gap is near zero
-        double gap = lambda1 - lambda0;
-
-        // Normalize by largest eigenvalue to make it scale-invariant
-        // double t_reliability = gap / (lambda2 + 1e-8);
-
-        // t_reliability ≈ 1.0 → well conditioned (good translation)
-        // t_reliability ≈ 0.0 → degenerate (pure rotation)
-
-        // if (t_reliability < 0.1 || (lambda1 < 1e-2 && lambda2 < 1e-2)) {
-        //     // Degenerate — pure rotation or near-pure rotation
-        //     t = Vector3d::Zero();  // signal that t is unreliable
-        //     return;
-        // }
         // 1. Must have minimum total parallax energy
         if (lambda2 < 1e-3) {
             t = Vector3d::Zero(); // Pure rotation / zero baseline
             return;
         }
-        // 2. Nullspace check: λ₀ must be significantly smaller than λ₁ (e.g., at least 5x-10x smaller)
-        // In your runs: λ₁ / λ₀ ≈ 76x, which is a strong pass.
-        // if (lambda1 / (lambda0 + 1e-8) < 5) {
-        //     t = Vector3d::Zero(); // Ambiguous translation direction
-        //     return;
-        // }
         // ── 2. Conditioning check (normalized by lambda2) ─────────────────
         // Good translation: lambda1 is a substantial fraction of lambda2
         // Forward motion / degenerate: lambda1 collapses relative to lambda2
@@ -356,7 +335,6 @@ private:
             t = Vector3d::Zero();
             return;
         }
-        // std::cout << " [pnec Optimizer] Translation reliability: " << t_reliability << std::endl;
 
         t = solver.eigenvectors().col(0);
         t = t.normalized();
@@ -380,9 +358,10 @@ private:
 
             // Approximate depth by triangulating
             // f1 x (depth2 * Rf2 + t) = 0
+            // Approximate depth by triangulating f1 x (depth2 * Rf2 + t) = 0
             Vector3d cross_f = f1.cross(Rf2);
             Vector3d cross_t = f1.cross(t);
-            
+
             double den = cross_f.squaredNorm();
             if (den > 1e-8) {
                 double depth2 = -cross_t.dot(cross_f) / den;
@@ -400,6 +379,8 @@ private:
         }
     }
 
+    // First-order (Sampson) approximation of squared geometric epipolar error for one
+    // correspondence under essential matrix E = [t_dir]_x * R.
     double sampsonError(const Vector3d& f, const Vector3d& f_prime,
                         const Matrix3d& R, const Vector3d& t_dir) {
         Matrix3d t_skew;
@@ -416,11 +397,16 @@ private:
         double den = Ef(0)*Ef(0)  + Ef(1)*Ef(1)
                    + Etf(0)*Etf(0) + Etf(1)*Etf(1);
 
-        return num / (den + 1e-8); // ✓ guard against zero denominator
+        return num / (den + 1e-8); // guard against zero denominator
     }
 };
 
 
+// Improved (currently unused — see the file-level note near the top of this file)
+// rewrite of RelativePoseEstimatorOld: instead of one rotation solve followed by one
+// translation solve, it alternates R/t refinement for max_outer_iters passes, adds a
+// Huber robust loss and Levenberg-Marquardt damping to solveRotation() for better
+// resilience to outlier matches, and re-checks cheirality after every pass.
 class RelativePoseEstimator {
 public:
     explicit RelativePoseEstimator(Logger& logger, const Matrix3d& K) : K_(K), logger(logger) {}
@@ -558,9 +544,10 @@ private:
 
             // Approximate depth by triangulating
             // f1 x (depth2 * Rf2 + t) = 0
+            // Approximate depth by triangulating f1 x (depth2 * Rf2 + t) = 0
             Vector3d cross_f = f1.cross(Rf2);
             Vector3d cross_t = f1.cross(t);
-            
+
             double den = cross_f.squaredNorm();
             if (den > 1e-8) {
                 double depth2 = -cross_t.dot(cross_f) / den;

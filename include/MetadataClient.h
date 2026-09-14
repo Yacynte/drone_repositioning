@@ -23,9 +23,14 @@
 #define SOCKET_ERROR   -1
 
 /**
- * @brief Manages the client connection to the metadata TCP server using POSIX sockets.
+ * @brief Manages the two POSIX socket connections used to talk to the outside world:
+ * a "command_handler" connection the operator/Unreal Engine uses to start/stop/pause
+ * repositioning (received on a background thread, see startReceiver()/receiveCommand()),
+ * and a "metadata_server" connection used to send computed drone commands out via
+ * SendMetadata(). Command state is exposed as atomics so main.cpp's loop thread can
+ * read it safely while receiveCommand() runs on rxThread.
  */
-class MetadataTcpClient 
+class MetadataTcpClient
 {
 private:
     Logger& logger;
@@ -34,20 +39,21 @@ private:
     int server_socket = INVALID_SOCKET;
     struct sockaddr_in address{};
     socklen_t addr_len ;
-    // Constants
-    // int DEFAULT_PORT = 9001; // Default port for metadata server
-    // std::string DEFAULT_IP = "127.0.0.1";
-    bool IsConnected() const;  
+    bool IsConnected() const;
 
 public:
+    // Spawns rxThread running receiveCommand() to consume incoming commands in the background.
     void startReceiver();
+    // Signals rxThread to stop and joins it.
     void stopReceiver();
-    void CloseConnectionhandler(int socket_to_close = -2); // -2 means close both, 0 for server_socket, 1 for client_socket
-    bool respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, 
+    // Closes the given handler socket: -2 = both, 0 = server_socket, 1 = client_socket.
+    void CloseConnectionhandler(int socket_to_close = -2);
+    // Converts the current rotation/translation error and rate into a 7-field CSV
+    // command ("roll,pitch,yaw,vx,vy,vz,state\n"), writes it to data_to_send, and sends
+    // it via SendMetadata(). Returns true once both rotation and translation errors are
+    // within tolerance (i.e. the drone has arrived at the target).
+    bool respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error,
                         cv::Point3f translation, std::string& data_to_send, bool simulation);
-    bool respositionFuncOld(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, 
-                        cv::Point3f translation, std::string& data_to_send, bool simulation);
-    // int server_socket = -1; // connected client socket
 
     // flags (atomic = safe to write/read from different threads)
     std::atomic<bool> startRepositioning{false};
@@ -59,45 +65,30 @@ public:
     std::atomic<bool> stopRotation{false};
     std::atomic<bool> stopTranslation{false};
 
-    /**
-     * @brief Constructor. No special initialization required for POSIX.
-     */
-    // MetadataTcpClient() = default;
     explicit MetadataTcpClient(Logger& logger);
     void CloseSocket();
 
-    /**
-     * @brief Destructor. Cleans up the socket.
-     */
     ~MetadataTcpClient()
     {
         CloseSocket();
     }
-    // bool Connect(const std::string& ip = "192.168.0.200", int port = 9010);
-    // bool StartConnectionHandler(const std::string& ip = "192.168.0.200", int port = 9020);
+
+    // Connects client_socket (TCP) to ip:port. Used for the outgoing metadata connection.
     bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
+    // Listens on ip:port (TCP) and accepts a single incoming connection, stored either
+    // in server_socket ("command_handler") or client_socket ("metadata_server").
     bool StartConnectionHandlerTCP(const std::string& ip = "127.0.0.1", int port = 9020, const std::string client = "command_handler");
+    // UDP equivalent of StartConnectionHandlerTCP: binds a UDP socket on ip:port that
+    // receiveCommand() reads datagrams from.
     bool StartConnectionHandlerUDP(const std::string& ip = "127.0.0.1", int port = 9020, const std::string client = "command_handler");
+    // Background-thread loop: reads newline-terminated commands (start/stop/pause/resume/...)
+    // and updates the atomic flags above. Runs until runRx is cleared by stopReceiver().
     void receiveCommand();
-    // bool Connect(const std::string& ip = "127.0.0.1", int port = 9010);
     std::atomic<bool> runRx{false};
     std::thread rxThread;
 
     // for assembling lines across recv() calls
     std::string rxAccum;
+    // Sends data_to_send (already-formatted command string) over client_socket.
     bool SendMetadata(const std::string& data_to_send);
-    /**
-     * @brief Attempts to connect to the metadata server.
-     * @param ip The target IP address (e.g., "127.0.0.1").
-     * @param port The target port (e.g., 9001).
-     * @return True on successful connection, false otherwise.
-     */
-    /**
-     * @brief Sends formatted metadata (alpha and angle) to the connected server.
-     * * The format used is a comma-separated string: "Alpha,Angle\n".
-     * @param alpha The alpha value (float).
-     * @param angle The angle value (float).
-     * @return True if the data was sent successfully, false otherwise.
-     */
-
 };

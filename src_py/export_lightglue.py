@@ -226,7 +226,6 @@ def export_model(
 
         opset_version=18,
         do_constant_folding=True,
-        # dynamo=False,
     )
 
     print(f"\nSaved: {output}")

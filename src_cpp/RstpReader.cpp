@@ -1,9 +1,16 @@
 #include "RtspReader.h"
 
+// When unreal_test is true and url contains "tcp", parses "tcp <ip> <port>" out of
+// url and opens a TCP connection now (frames are pulled later by TcpReaderLoop()).
+// When unreal_test is true but url doesn't look like a TCP address, instead builds
+// an ffmpeg command line to pull the RTSP stream as raw BGR frames (read later by
+// readerLoop()). When unreal_test is false, does neither — start() is expected to be
+// given an already-opened cv::VideoCapture and DroneReaderLoop() is used instead.
+// Either way, the shared-memory frame segment is created before returning.
 RtspReader::RtspReader(Logger& logger, const std::string& logImages, const std::string& url, int width, int height, bool unreal_test, const char* shm_name_frame)
     : width_(width), height_(height), unreal_test_(unreal_test), shm_name_frame_(shm_name_frame), logger(logger), logImages_(logImages)
 {
-    
+
     if (unreal_test_){
         if(url.find("tcp") != std::string::npos){
             frameSize_ = width_ * height_ * 4; // Assuming 4 bytes per pixel for RGBA
@@ -61,6 +68,7 @@ RtspReader::~RtspReader() {
 }
 
 
+// Opens a TCP connection to the Unreal Engine frame-feed server at ip:port.
 bool RtspReader::Connect(const std::string& ip, int port)
 {
     CloseSocket(); // Close any existing socket
@@ -120,6 +128,7 @@ void RtspReader::CloseSocket()
 }
 
 
+// Loops recv() until len bytes have been read or the connection fails/closes.
 bool RtspReader::recvAll(int sock, uint8_t* buf, size_t len) {
     size_t received = 0;
     while (received < len) {
@@ -130,6 +139,9 @@ bool RtspReader::recvAll(int sock, uint8_t* buf, size_t len) {
     return true;
 }
 
+// Reads a length-prefixed (4-byte big-endian) encoded image and decodes it via
+// cv::imdecode. Currently unused — TcpReaderLoop() reads fixed-size raw GBRA frames
+// directly via recvAll() instead of this length-prefixed encoded format.
 bool RtspReader::receiveImage(int sock, cv::Mat& outImage) {
     uint8_t lenBuf[4];
     if (!recvAll(sock, lenBuf, 4)) return false;
@@ -145,8 +157,13 @@ bool RtspReader::receiveImage(int sock, cv::Mat& outImage) {
 }
 
 
+// Picks which background loop to run based on how this reader was constructed:
+//   - !unreal_test_ + externalCap given -> DroneReaderLoop() (local camera/RTSP via cv::VideoCapture)
+//   - unreal_test_ + TCP ip/port parsed in the constructor -> TcpReaderLoop()
+//   - unreal_test_ + no TCP address -> readerLoop() (ffmpeg pipe built in the constructor)
 void RtspReader::start(cv::VideoCapture* externalCap) {
-    
+
+
     if(!unreal_test_){
         if(externalCap != nullptr) {
             logger.log("RtspReader", "Loop for Live camera");
@@ -177,8 +194,9 @@ void RtspReader::start(cv::VideoCapture* externalCap) {
     
 }
 
+// Saves the last raw frame as an "end" snapshot, stops the background loop/thread
+// (and the ffmpeg pipe if one is running), and tears down the shared-memory segment.
 void RtspReader::stop() {
-    // auto [frame, success_frame] = getFrame();
     {
         std::string img = logImages_ + "imageEnd" + start_time + ".png";
         cv::imwrite(img, frame);
@@ -198,8 +216,6 @@ void RtspReader::stop() {
             if (thread_.joinable()) thread_.join();
     }
     else {
-        // running_ = false;
-
         if (thread_.joinable())
             thread_.join();
 
@@ -210,7 +226,9 @@ void RtspReader::stop() {
     
 }
 
-// bool RtspReader::getFrame(cv::Mat& out)
+// Moves the latest published frame out of lastFrame_ (cheap pointer swap) and
+// returns it. The bool is false if no frame has been published since the last call
+// (lastFrame_ was already empty), in which case the returned cv::Mat is empty too.
 std::tuple<cv::Mat, bool> RtspReader::getFrame()
 {
     cv::Mat out;
@@ -227,6 +245,10 @@ std::tuple<cv::Mat, bool> RtspReader::getFrame()
     return {out, true};
 }
 
+// Background loop for the ffmpeg-pipe RTSP path (unreal_test_ with a non-TCP url):
+// launches the ffmpeg command built in the constructor, reads fixed-size raw BGR
+// frames from its stdout, converts to grayscale, and publishes them (both via
+// lastFrame_ for getFrame() and via write_frame() into shared memory).
 void RtspReader::readerLoop() {
 #ifdef _WIN32
     pipe_ = _popen(cmd_.c_str(), "rb");
@@ -244,11 +266,9 @@ void RtspReader::readerLoop() {
     while (running_) {
         size_t bytes = fread(buffer.data(), 1, frameSize_, pipe_);
         if (bytes < frameSize_) {
-            // printf("WARN: Incomplete frame or stream ended.\n");
             continue;
         }
 
-        // std::cout << " width_: "<< width_ << " height_: " << height_ << std::endl;
         cv::Mat frame(height_, width_, CV_8UC3, buffer.data());
         cv::Mat grayFrame;
         cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
@@ -261,6 +281,8 @@ void RtspReader::readerLoop() {
     }
 }
 
+// True if image's mean brightness is below threshold. Currently unused — no caller
+// checks for dark/underexposed frames yet.
 bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
 {
     cv::Mat gray;
@@ -270,11 +292,16 @@ bool RtspReader::isImageDark(const cv::Mat& image, double threshold)
         cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
 
     cv::Scalar meanVal = cv::mean(gray);
-    // std::cout << "image mean brightness: " << meanVal[0] << std::endl;
 
     return meanVal[0] < threshold;
 }
 
+// Background loop for the local-camera/cv::VideoCapture path (!unreal_test_, used
+// with a live USB camera): first "warms up" by grabbing/discarding up to 20 frames,
+// then loops reading frames, auto-reconnecting to the fixed V4L2 device path (see
+// `reconnect` below) after MAX_FAILS consecutive bad reads, giving up entirely after
+// MAX_TRIALS failed reconnect attempts. Publishes each good frame the same way as
+// readerLoop().
 void RtspReader::DroneReaderLoop(){
     logger.log("RtspReader", "Started DroneReaderLoop");
     int droppedFrames = 0;
@@ -282,7 +309,6 @@ void RtspReader::DroneReaderLoop(){
     bool suc;
     logger.log("RtspReader", "test frame 0");
     while (droppedFrames < 20 && cap->grab() ) {
-        // std::cout << "[RTSP Reader] read frame: " << droppedFrames << std::endl;
         suc = cap->read(frame_);
         if (!suc || frame_.empty()) {
             {
@@ -293,31 +319,15 @@ void RtspReader::DroneReaderLoop(){
                 logger.log("RtspReader", ss.str());
             }
         }
-        // If your loop was blocked for a while, this rapidly skips 
+        // If your loop was blocked for a while, this rapidly skips
         // through old buffered frames to catch up to live.
-        // Break early if we think we are close to live (optional heuristic)
         droppedFrames++;
     }
     logger.log("RtspReader", "test frame");
-    // if (suc) {
-    //     start_time = timeToUnderscoreString();
-    //     std::string img = logImages_ + "imageStart" + start_time + ".png";
-    //     cv::imwrite(img, frame_);
-    // }
-    // else logger.log("RtspReader", "error: cannot write test frame");
-
-    // std::cout << "[RtspReader] Started DroneReaderLoop\n";
 
     auto reconnect = [&]() -> bool {
         logger.log("RtspReader", "error: Reconnecting to camera...");
         cap->release();
-
-        // Wait for the device node to come back
-        // for (int i = 0; i < 10; ++i) {
-        //     std::this_thread::sleep_for(std::chrono::seconds(1));
-        //     if (std::filesystem::exists(devicePath_)) break;
-        //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
-        // }
 
         cap->open("/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0", cv::CAP_V4L2);
         if (!cap->isOpened()) {
@@ -347,17 +357,6 @@ void RtspReader::DroneReaderLoop(){
     int trialCount = 0;
 
     while (running_) {
-        // cv::Mat frame;
-
-        // std::cerr << "[CAM] before grab\n";
-
-        // for (int i = 0; i < 5; ++i) {
-        //     bool ok = cap->grab();
-        //     // std::cerr << "[CAM] grab " << i << ": " << ok << "\n";
-        // }
-
-        // std::cerr << "[CAM] before read\n";
-
         bool success = false;
         try {
             success = cap->read(frame);
@@ -370,15 +369,8 @@ void RtspReader::DroneReaderLoop(){
             continue;
         }
 
-        // std::cerr << "[CAM] after read: "
-        //         << success
-        //         << " empty=" << frame.empty()
-        //         << " size=" << frame.cols << "x" << frame.rows
-        //         << "\n";
-
          if (!success || frame.empty()) {
             failCount++;
-            // std::cerr << "[CAM] No frame (" << failCount << "/" << MAX_FAILS << ")\n";
 
             if (failCount >= MAX_FAILS) {
                 failCount = 0;
@@ -414,31 +406,23 @@ void RtspReader::DroneReaderLoop(){
             grayFrame.copyTo(lastFrame_);
         }
 
-        // std::cerr << "[CAM] frame published\n";
-
         write_frame(grayFrame);
     }
 
 }
 
+// Background loop for the Unreal Engine TCP frame-feed path (unreal_test_ with a
+// "tcp <ip> <port>" url, connected in the constructor): reads fixed-size raw GBRA
+// frames pushed by Unreal Engine, channel-swaps them to BGR, converts to grayscale,
+// and publishes them the same way as readerLoop()/DroneReaderLoop().
 void RtspReader::TcpReaderLoop() {
-    // std::cout << "in TcpReaderLoop" << std::endl;
     while (running_) {
-        // std::cout << "Waiting to receive image from TCP stream..." << std::endl;
-        
-        // bool success = receiveImage(client_socket, frame);
         std::vector<uint8_t> buffer(frameSize_);
         bool success = recvAll(client_socket, buffer.data(), frameSize_);
-        // std::cout << "Received frame of size: " << buffer.size() << std::endl;
         if (success ) {
-            // frame = cv::imdecode(buffer, cv::IMREAD_COLOR);
             cv::Mat gbra_frame(height_, width_, CV_8UC4, buffer.data());
-            // 2. Create the destination matrix
-            // cv::Mat frame;
 
-            // 3. Convert GBRA to BGR 
-            // Since G=0, B=1, R=2, A=3, transforming to BGR (1,0,2) requires a custom color mix or manual channel shuffling.
-            // The cleanest native OpenCV way is to swap the channels manually:
+            // Convert GBRA to BGR: G=0, B=1, R=2, A=3 → swap channels manually
             int from_to[] = { 0,0,  1,1,  2,2 }; // Map G->B, B->G, R->R
             frame.create(height_, width_, CV_8UC3);
             cv::mixChannels(&gbra_frame, 1, &frame, 1, from_to, 3);
@@ -463,6 +447,9 @@ void RtspReader::TcpReaderLoop() {
 }
 
 
+// Creates (or opens) the /dev/shm frame segment, sizes it to TOTAL_SHM_SIZE, mmaps
+// it, and initializes the header (is_alive = 1, frame_id = 0). Called once from the
+// constructor.
 void RtspReader::create_and_map_shm() {
     // Shared memory layout:
     // Offset  Size  Type      Field
@@ -516,8 +503,11 @@ void RtspReader::create_and_map_shm() {
     }
 }
 
+// Publishes one grayscale frame into shared memory for the external Python process
+// to pick up: converts to grayscale if needed, validates it's exactly WIDTH x HEIGHT
+// CV_8UC1, waits out any in-progress read (is_reading), then copies pixel data under
+// is_writing and bumps frame_id. Throws if the frame size/type doesn't match.
 void RtspReader::write_frame(const cv::Mat& frame) {
-    // static std::atomic<uint32_t> last_frame_id{0};
     if (frame.empty()) return;
     cv::Mat gray_frame;
     if(frame.type() == CV_8UC3) {
@@ -537,7 +527,6 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     }
 
     if (gray_frame.cols != WIDTH || gray_frame.rows != HEIGHT || gray_frame.type() != CV_8UC1) {
-    //   throw std::invalid_argument("Frame must be 1080p Grayscale (CV_8UC1)");
         throw std::invalid_argument(
                 "Frame must be " + std::to_string(WIDTH) + "x" + std::to_string(HEIGHT) + 
                 " Grayscale (CV_8UC1), got " + std::to_string(gray_frame.cols) + "x" + 
@@ -553,16 +542,7 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     // 2. Set is_writing flag to 1
     header_->is_writing = 1;
 
-    // 3. Fast memory copy (~0.05ms)
-    // std::memcpy(image_buffer_, gray_frame.data, FRAME_SIZE);
-    // 3. Write image data to shared memory
-    // Memory layout:
-    // [0-15]        : Header struct (3 bools + padding + uint32_t frame_id + width/height)
-    // [16-end]      : Image buffer (WIDTH * HEIGHT bytes)
-    // uint8_t* dest = image_buffer_;
-    // const uint8_t* src = gray_frame.data;
-
-    // Use memcpy for contiguous row data
+    // 3. Use memcpy for contiguous row data
     if (gray_frame.isContinuous()) {
         // Fast path: frame data is contiguous in memory
         std::memcpy(image_buffer_, gray_frame.data, FRAME_SIZE);
@@ -583,16 +563,12 @@ void RtspReader::write_frame(const cv::Mat& frame) {
     
     // 5. Signal that writing is done
     header_->is_writing = 0;
-
-    // 4. Increment frame_id
-    // header_->frame_id = header_->frame_id.fetch_add(1, std::memory_order_relaxed) + 1;
-    // header_->frame_id.fetch_add(1, std::memory_order_relaxed);
-
-    // 5. Clear is_writing flag
-    // header_->is_writing.store(0, std::memory_order_release);
-
 }
 
+// Marks the segment dead and tears it down. NOTE: blocks for a flat 10 seconds after
+// setting is_alive = 0 before unmapping, presumably to give the Python reader time to
+// notice and stop touching the segment — this makes every shutdown (main.cpp exiting
+// the repositioning loop) take at least 10s on this step alone.
 void RtspReader::cleanupSharedMemory() {
     // 1. Unmap the memory pointer (if it was successfully mapped)
     header_->is_alive = 0;

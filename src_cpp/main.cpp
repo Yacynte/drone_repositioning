@@ -1,3 +1,21 @@
+// ImageMatcher: the drone-repositioning entry point.
+//
+// Overall flow of main():
+//   1. Parse CLI flags, set up logging (Logger for text logs, AlgoLogger for CSV).
+//   2. Start the MetadataTcpClient command receiver (listens for start/stop/pause
+//      commands over UDP — see MetadataClient.h/.cpp).
+//   3. Open the video source (openCapture(): local camera, RTSP via OpenCV/ffmpeg, or
+//      a TCP feed from Unreal Engine) and start RtspReader, which publishes frames
+//      both in-process and into shared memory.
+//   4. Launch the external Python SuperPoint/LightGlue matcher process
+//      (launch_python_posix(), see src_py/matches_onnx.py) and open the SPSGReader
+//      shared-memory link to read its match results (see Matches.hpp).
+//   5. Construct the ImageMatcher against the target image.
+//   6. Run the main loop: wait for a start command, then each iteration reads a
+//      frame + the latest matches, calls ImageMatcher::getAlignment() to estimate
+//      relative rotation/translation, converts that into command velocities, sends
+//      them via MetadataTcpClient::respositionFunc(), and logs everything to CSV via
+//      AlgoLogger. Stops on a stop command, a timeout, or reaching+holding the target.
 #include "ImageMatcher.h"
 #include "MetadataClient.h"
 #include "RtspReader.h"
@@ -15,35 +33,33 @@
 #include <string>
 #include <vector>
 
-// Helper constants used for velocity scaling and smoothing.
+// Helper constants used for velocity scaling.
 namespace {
 constexpr float kRotationGain = 0.1f;
 constexpr float kTranslationGain = 0.2f;
-constexpr float kVelocitySmoothing = 0.5f;
 constexpr float kMaxVelocity = 50.0f;
 constexpr float kMaxRotationRate = 5.0f;
-constexpr int kReprojectWindowSize = 10;
 
 // Open either a local camera or remote stream depending on the selected mode.
+// mode == "live": opens the fixed V4L2 device below and blocks (up to t seconds)
+//   warming it up until WARMUP_GOOD_FRAMES consecutive good frames are read.
+// mode == "stream" with a TCP url: does nothing here — RtspReader handles that
+//   connection itself once started.
+// mode == "stream" otherwise: opens streamUrl via OpenCV's FFmpeg backend, retrying
+//   until it succeeds (this call does NOT time out).
 bool openCapture(const std::string& mode,
                  const std::string& streamUrl,
                  int t,
                  cv::VideoCapture& cap,
                  Logger& appLogger) {
     if (mode == "live") {
-
-        std::string device = "/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0"
+        // NOTE: hardcoded to this specific USB camera's by-id device path. If the
+        // camera hardware changes, this needs to change too (or be made a CLI flag).
+        std::string device = "/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0";
 
         auto reconnect = [&]() -> bool {
             appLogger.log("main", "error: [CAM] Reconnecting to camera...");
             cap.release();
-
-            // Wait for the device node to come back
-            // for (int i = 0; i < 10; ++i) {
-            //     std::this_thread::sleep_for(std::chrono::seconds(1));
-            //     if (std::filesystem::exists(devicePath_)) break;
-            //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
-            // }
 
             cap.open(device, cv::CAP_V4L2);
             if (!cap.isOpened()) {
@@ -66,9 +82,7 @@ bool openCapture(const std::string& mode,
             appLogger.log("main", "[CAM] Reconnected");
             return true;
         };
-        // int indices[] = {cameraIndex, cameraIndex == 0 ? 1 : 0};
-        // std::string device = "/dev/video" + std::to_string(cameraIndex);
-        if (!std::filesystem::exists(device)){ 
+        if (!std::filesystem::exists(device)){
             {
                 std::ostringstream ss;
                 ss << "[Camera] file " << device << " does not exist";
@@ -78,14 +92,12 @@ bool openCapture(const std::string& mode,
 
         cap.release();
 
-        // for (int index : indices) {
         {
             std::ostringstream ss;
             ss << "[Camera] Trying " << device;
             appLogger.log("main", ss.str());
         }
 
-        // cap.release();
         if(reconnect()) {
             {
                 std::ostringstream ss;
@@ -96,8 +108,6 @@ bool openCapture(const std::string& mode,
             appLogger.log("main", "Warming up sensor...");
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-
-        
 
         cv::Mat frame;
 
@@ -192,15 +202,10 @@ bool openCapture(const std::string& mode,
         );
 
         return true;
-        return true;
     }
 
     if (mode == "stream" && !(streamUrl.find("tcp") != std::string::npos)) {
         setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp", 1);
-        // while (!cap.open(streamUrl, cv::CAP_FFMPEG)) {
-        //     std::cout << "Waiting for stream to be available: " << streamUrl << std::endl;
-        //     usleep(1000 * 1000);
-        // }
         // Retry loop until the stream is successfully opened
         while (!cap.isOpened()) {
             {
@@ -216,7 +221,6 @@ bool openCapture(const std::string& mode,
                 usleep(1000 * 1000); // Wait 1 second before trying again
             }
         }
-        // cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
         return true;
     }
     if (mode == "stream" && streamUrl.find("tcp") != std::string::npos) {
@@ -258,10 +262,6 @@ int main(int argc, char** argv) {
     const int timer = getInt(flags, "--timer", 180);
     const int targetImageIndex = getInt(flags, "--targetIndex", -1);
 
-    // bool hardStop = false;
-
-    // Application logger for human-readable runtime logs.
-
     // Ensure log directory exists before creating the logger.
     const std::filesystem::path logDirectory = std::filesystem::path(logPath);
     if (!logDirectory.empty() && !std::filesystem::exists(logDirectory)) {
@@ -296,12 +296,6 @@ int main(int argc, char** argv) {
     }
     client.startReceiver();
 
-    // if (!client.StartConnectionHandler(msgIp, msgPort, "metadata_server")) {
-    //     std::cerr << "Failed to start metadata server connection handler. Ensure port " << msgPort << " is available." << std::endl;
-    //     return -1;
-    // }
-    // std::cout << "Connected to metadata server" << std::endl;
-
     // Open the selected video source and set the requested resolution.
     cv::VideoCapture cap;
     if (!openCapture(mode, streamUrl, timer, cap, appLogger)) {
@@ -313,8 +307,6 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
-    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
     if (!cap.isOpened() && !(streamUrl.find("tcp") != std::string::npos)) {
         appLogger.log("main", "error: Cannot open camera/stream");
         return -1;
@@ -338,8 +330,6 @@ int main(int argc, char** argv) {
        cam = streamUrl;
     }
     std::this_thread::sleep_for(std::chrono::seconds(5));
-    // std::cout << "To launch Python process for matches.py "<< std::endl;
-    // launch_python(targetImagePath);
     if (targetImageIndex != -1){
         // Construct the filename using the index: e.g., "camera0.png"    
         targetImagePath =  expandUser("~/drone_repositioning/targets/") + "targetImage" + std::to_string(targetImageIndex) + ".jpg";
@@ -372,16 +362,10 @@ int main(int argc, char** argv) {
         ss << "Image matcher initialized with target image: " << targetImagePath;
         appLogger.log("main", ss.str());
     }
-    // cv::Mat frame;
-    // std::vector<int> directionHistory;
-    std::vector<float> reprojectErrors;
-    // cv::Point3f lastCmdVx(0.0f, 0.0f, 0.0f);
-    // cv::Point3f lastAngleRate(0.0f, 0.0f, 0.0f);
     bool hasStarted = false;
     bool complete = false;
     bool atTarget = false;
     double arrivalTime = 0.0;
-    // double oldMeanError = std::numeric_limits<double>::infinity();
 
     // Main repositioning loop: wait for start, process frames, and send commands.
     double start_time = AlgoLogger::nowWallSec();
@@ -411,14 +395,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // if (client.pauseRepositioning.load()) {
-        //     std::cout << "Received command to pause repositioning" << std::endl;
-        //     while (!client.resumeRepositioning.load()) {
-        //         usleep(1000 * 100);
-        //     }
-        //     std::cout << "Resuming repositioning" << std::endl;
-        // }
-
         while (client.pauseRepositioning.load()){
             appLogger.log("main", "Received command to pause repositioning");
             usleep(1000 * 100);
@@ -429,11 +405,8 @@ int main(int argc, char** argv) {
         }
 
         hasStarted = true;
-        // cv::Mat frame;
-        // bool success;
         auto [frame, success_frame] = reader.getFrame();
         if (!success_frame) {
-            // std::cout << "Waiting to receive image \n";
             // Skip processing when no new frame is available.
             continue;
         }
@@ -446,23 +419,17 @@ int main(int argc, char** argv) {
         Matches matches = result.value();
 
         if (!matches.newMatches){
-            // std::cout << "Waiting for new matches....\n";
             continue;
         }
 
         // Compute alignment direction and error metrics from the current frame.
-        const double imgTs = AlgoLogger::nowWallSec();
-        // const auto [rotationMatrix, directionCv, flow, transError, success] = matcher.getAlignmentDirection(frame, client.rotationOnly.load());
         const auto [rotationMatrix, direction, transError_, success] = matcher.getAlignment(matches, frame);
-        // const float rotError = std::acos((cv::trace(rotationMatrix)[0] - 1.0f) / 2.0f) * 180.0f / CV_PI;
-     
+
         // Convert estimated rotation and translation to the appropriate coordinate frame.
         const cv::Point3f rotationVec = rotmatToYPRDeg_XYZ(rotationMatrix);
         bool hasNaNRot = std::isnan(rotationVec.x) || std::isnan(rotationVec.y) || std::isnan(rotationVec.z);
         bool hasNanTrans = std::isnan(direction.x) || std::isnan(direction.y) || std::isnan(direction.z) || std::isnan(transError_);
-        // std::cout << "rotation vec: x=" << rotationVec.x << " y=" << rotationVec.y << " z=" << rotationVec.z << std::endl;
-        // std::cout << "direction: x=" << direction.x << " y=" << direction.y << " z=" << direction.z << std::endl;
-        
+
         if(hasNaNRot) {
             appLogger.log("main", "error: NaN detected in rotation or translation vector, skipping this frame.");
             continue;
@@ -481,25 +448,12 @@ int main(int argc, char** argv) {
         }
         
         cv::Point3f directionCv(direction.x * transError, direction.y * transError, direction.z * transError);
-        // const cv::Point3f rotationVec = rotmatRQ_YZX(rotationMatrix);
-        const cv::Point3f rotation = rotationVec; // Convert to degrees if needed);
+        const cv::Point3f rotation = rotationVec;
         const cv::Point3f translation = unrealTest ? ConvertCVToUE(directionCv) : directionCv;
-        // const cv::Point3f px_error = unrealTest ? ConvertCVToUE(trans_vec) : trans_vec;
-        
-        // Compute command velocities, then apply smoothing for stability.
+
+        // Compute command velocities.
         cv::Point3f angleRateCmd = kMaxRotationRate * activation(rotation, kRotationGain);
         cv::Point3f cmdVx = kMaxVelocity * activation(translation, kTranslationGain);
-        
-
-        // const int meanPreviousDirection = (directionHistory.size() < 8)
-        //     ? -2
-        //     : std::round(std::accumulate(directionHistory.begin(), directionHistory.end(), 0.0) / directionHistory.size());
-        // if (meanPreviousDirection == 0) {
-        //     cmdVx.x = 0.0f;
-        // }
-
-        // cmdVx = kVelocitySmoothing * cmdVx + (1.0f - kVelocitySmoothing) * lastCmdVx;
-        // angleRateCmd = kVelocitySmoothing * angleRateCmd + (1.0f - kVelocitySmoothing) * lastAngleRate;
 
         {
             std::ostringstream ss;
@@ -539,7 +493,6 @@ int main(int argc, char** argv) {
         
         if (atTarget && ((currentTime - arrivalTime > 1.0) ) && arrivalTime > 0.0) {
             appLogger.log("main", "Maintained target position for 2 seconds, stopping repositioning");
-            std::string dataToSend;
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
             std::string data_to_send = ss.str();

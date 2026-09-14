@@ -499,6 +499,11 @@ def export_superpoint(
     width: int,
     max_keypoints: int,
 ):
+    """Builds IndependentSuperPoint, loads the official LightGlue weights into it,
+    and traces it to ONNX at `output` with dynamic height/width/num_keypoints axes.
+    `max_keypoints` is accepted for CLI symmetry with export_lightglue.py but isn't
+    used here — see the IMPORTANT note below on why TopK is intentionally left out of
+    the exported graph."""
 
     print()
     print("=" * 60)

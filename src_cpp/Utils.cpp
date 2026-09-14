@@ -1,5 +1,4 @@
 #include "Utils.h"
-// #include "AlgoLogger.hpp"
 
 bool hasNaN(const cv::Point3f& p) {
     return std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z);
@@ -8,7 +7,6 @@ bool hasNaN(const cv::Point3f& p) {
 
 void launch_python(const std::string& target) {
     std::string cmd = "python3 src/matches.py"
-                    //   " --camera " + camera +
                       " --target " + target + " &";  // & = background
     std::system(cmd.c_str());
 }
@@ -38,8 +36,6 @@ cv::Mat matrix3dToMat(const Eigen::Matrix3d& R) {
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++)
             m.at<double>(i, j) = R(i, j);
-    // cv::Mat m_float;
-    // m.convertTo(m_float, CV_32F);
     return m;
 }
 
@@ -56,7 +52,6 @@ Eigen::Matrix3d matToMatrix3d(const cv::Mat& R) {
 cv::Point3f activation(cv::Point3f x, float k , std::string function ) {
     if (function == "sigmoid") {
         cv::Point3f sig;
-        // float k = 1.0f;  // increase → steeper (toward tanh), decrease → gentler
         sig.x = 2.0f / (1.0f + std::exp(-k * x.x)) - 1.0f;
         sig.y = 2.0f / (1.0f + std::exp(-k * x.y)) - 1.0f;
         sig.z = 2.0f / (1.0f + std::exp(-k * x.z)) - 1.0f;
@@ -76,7 +71,7 @@ cv::Point3f activation(cv::Point3f x, float k , std::string function ) {
             1.0f - std::exp(-x.z)
         );
     }
-    return x; // cv::Point3f(0, 0, 0); // fallback
+    return x; // fallback
 }
 
 
@@ -147,9 +142,7 @@ cv::Point3f rotmatToYPRDeg_XYZ(const cv::Mat& R)
     }
 
     const double rad2deg = 180.0 / CV_PI;
-    // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
     return cv::Point3f((float)(roll * rad2deg), (float)(pitch * rad2deg), (float)(yaw * rad2deg));
-    // return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
 }
 
 cv::Point3f rotmatToRPYDeg_XYZ(const cv::Mat& R)
@@ -186,22 +179,11 @@ cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
 {
     CV_Assert(R.rows == 3 && R.cols == 3);
 
-    // cv::Mat Q, R;
-    // cv::RQDecomposition(rotationMatrix, Q, R); // R is now a clean rotation matrix
-    // Now extract angles from R
-
     const float r00 = R.at<float>(0,0), r01 = R.at<float>(0,1), r02 = R.at<float>(0,2);
     const float r10 = R.at<float>(1,0), r11 = R.at<float>(1,1), r12 = R.at<float>(1,2);
     const float r20 = R.at<float>(2,0), r21 = R.at<float>(2,1), r22 = R.at<float>(2,2);
 
     float roll, pitch, yaw;
-
-    // Ensure the values are sane before computing
-    // float val = std::pow(r21, 2) + std::pow(r22, 2);
-    // // Ensure we don't sqrt a negative number
-    // float sqrt_val = std::sqrt(std::max(0.0f, val));
-
-    // pitch = std::atan2(-r20, sqrt_val);
 
     pitch = std::asin(std::clamp(-r20, -1.0f, 1.0f));
 
@@ -219,9 +201,7 @@ cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
     }
 
     const float rad2deg = 180.0 / CV_PI;
-    // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
     return cv::Point3f(roll * rad2deg, pitch * rad2deg, yaw * rad2deg);
-    // return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
 }
 
 cv::Point3f rotmatRQ_YZX(const cv::Mat& R){
@@ -234,11 +214,6 @@ cv::Point3f rotmatRQ_YZX(const cv::Mat& R){
     // Execute RQ Decomposition
     // Pass the rotation matrix R as the input source
     cv::Vec3d eulerAngles = cv::RQDecomp3x3(R, mtxR, mtxQ, Qx, Qy, Qz);
-
-    // 4. Output the extracted Euler Angles
-    // std::cout << "Pitch (X-axis rotation) in degrees: " << eulerAngles[0] << std::endl;
-    // std::cout << "Yaw   (Y-axis rotation) in degrees: " << eulerAngles[1] << std::endl;
-    // std::cout << "Roll  (Z-axis rotation) in degrees: " << eulerAngles[2] << std::endl;
 
     return cv::Point3f(eulerAngles[2], eulerAngles[0], eulerAngles[1]);
 }

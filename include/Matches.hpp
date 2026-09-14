@@ -17,22 +17,28 @@
 #include <Utils.h>
 #include "Logger.h"
 
-// struct Matches {
-//     int n = 0;
-//     std::vector<cv::Point2f> kpts0;
-//     std::vector<cv::Point2f> kpts1;
-//     std::vector<float> scores;
-//     std::vector<cv::Point3f> covariances;
-//     bool newMatches = false;
-// };
-
+// Reads SuperPoint/LightGlue keypoint matches out of the POSIX shared-memory segment
+// written by the external Python process (src_py/matches_onnx.py, `_write_matches`).
+// The `Matches` struct itself is defined in Utils.h since both sides (this reader and
+// ImageMatcher) need it.
+//
+// Shared memory layout (SHM_SIZE bytes, written by Python):
+//   [0]      uint8   is_alive     (0 = Python has shut down)
+//   [1]      uint8   is_writing   (1 while Python is mid-write)
+//   [2]      uint8   is_reading   (1 while this reader is mid-copy)
+//   [3..6]   uint32  frame_id     (incremented by Python on every new match set)
+//   [7..10]  int32   n            (number of matches in this payload, may be 0)
+//   [...]    n * (kpts0, kpts1, scores, covariances) — see parse() below.
 class SPSGReader {
 public:
     static constexpr int    MAX_KP   = 512;
     static constexpr size_t SHM_SIZE = 1 + 1 + 1 + 4 + 4 + MAX_KP * (2+2+1+3) * 4;
 
+    // Opens the shared-memory segment `name`, retrying for up to ~5 minutes (600 *
+    // 500ms) since Python may not have created it yet at process startup. Throws
+    // std::runtime_error if it never becomes available.
     explicit SPSGReader(Logger& logger, const char* name = "/sp_sg_matches"): logger(logger) {
-        
+
         for (int i = 0; i < 600; i++){
             fd_ = shm_open(name, O_RDWR, 0666);
             if (fd_ >= 0) {
@@ -74,9 +80,11 @@ public:
         }
     }
 
-    // Spin until Python finishes writing, then copy.
+    // Waits (busy-spin) for Python to finish writing a new frame's matches, then
+    // copies the payload out and parses it. Returns std::nullopt if Python has set
+    // is_alive = 0 (shut down); returns an empty Matches{} (newMatches = false) if the
+    // frame_id hasn't advanced since the last call.
     std::optional<Matches> read() {
-        // const volatile uint8_t* base = static_cast<volatile uint8_t*>(ptr_);
         volatile uint8_t* data  = static_cast<volatile uint8_t*>(ptr_);
         if (data[0] == 0) {
             logger.log("SPSGReader", "Python shut down, exiting.");
@@ -105,12 +113,8 @@ public:
         if (current_id == last_frame_id_)
             return Matches{};   // same frame — return empty, don't print
 
-        // while (data[1] == 2)  // spin while writing
-        //     asm volatile("yield" ::: "memory");
-
         data[2] = 1;
         // take a snapshot
-        // uint8_t snap[SHM_SIZE];
         static std::vector<uint8_t> snap(SHM_SIZE);
         memcpy(snap.data(), (const uint8_t*)data, SHM_SIZE);
 
@@ -119,18 +123,17 @@ public:
         return parse(snap.data(), logger);
     }
 
+    // Signals Python to stop (is_alive = 0) and unmaps/closes the shared-memory segment.
     bool stop() {
         volatile uint8_t* data  = static_cast<volatile uint8_t*>(ptr_);
         data[0] = 0; // signal to Python to stop
         if (ptr_ != nullptr) {
-            // TOTAL_SHM_SIZE must be the same size you used in mmap()
             if (munmap(ptr_, SHM_SIZE) == -1) {
                 logger.log("SPSGReader", "error: munmap failed");
             }
             ptr_ = nullptr;
         }
-       
-        // 2. Close the file descriptor (if it is open)
+
         if (fd_ != -1) {
             close(fd_);
             fd_ = -1;
@@ -146,6 +149,8 @@ private:
     Matches last_;
     uint32_t last_frame_id_ = 0;
 
+    // Deserializes a raw shared-memory snapshot (as laid out in the class comment
+    // above) into a Matches struct.
     static Matches parse(const uint8_t* p, Logger& logger) {
         Matches m;
         p += 3 + 4;                                      // skip flag
@@ -172,8 +177,10 @@ private:
 };
 
 
+// Standalone smoke test — uncomment to check the shared-memory link to Python without
+// running the full ImageMatcher pipeline.
 // int main() {
-//     std::cout << "SHM_SIZE=" << SPSGReader::SHM_SIZE 
+//     std::cout << "SHM_SIZE=" << SPSGReader::SHM_SIZE
 //               << " MAX_KP=" << SPSGReader::MAX_KP << "\n";
 //     SPSGReader reader("/sp_sg_matches");
 //     std::cout << "Connected to shared memory.\n";
@@ -187,12 +194,5 @@ private:
 //         }
 //         Matches m = result.value();
 //         if (m.n > 0) std::cout << "matches: " << m.n << "\n";
-
-//         // for (int i = 0; i < m.n; ++i) {
-//         //     float x0 = m.kpts0[i][0], y0 = m.kpts0[i][1];
-//         //     float x1 = m.kpts1[i][0], y1 = m.kpts1[i][1];
-//         //     float s  = m.scores[i];
-//         //     // feed into your pipeline
-//         // }
 //     }
 // }

@@ -7,6 +7,8 @@
 MetadataTcpClient::MetadataTcpClient(Logger& logger): logger(logger) {}
 
 
+// Client-side TCP connect (used by TestClient() below; the live pipeline instead
+// uses StartConnectionHandlerTCP/UDP to accept incoming connections).
 bool MetadataTcpClient::Connect(const std::string& ip, int port)
 {
     CloseSocket(); // Close any existing socket
@@ -47,7 +49,6 @@ bool MetadataTcpClient::Connect(const std::string& ip, int port)
         return false;
     }
 
-    // std::cout << "Successfully connected to server at " << ip << ":" << port << std::endl;
     {
         std::ostringstream ss;
         ss << "Successfully connected to server at " << ip << ":" << port;
@@ -57,6 +58,9 @@ bool MetadataTcpClient::Connect(const std::string& ip, int port)
 }
 
     
+// Sends data_to_send as a UDP datagram to `address` (the peer StartConnectionHandlerUDP
+// last received from/bound to). Despite using sendto(), this relies on client_socket
+// being a connected/bound socket set up by StartConnectionHandlerUDP or Connect().
 bool MetadataTcpClient::SendMetadata(const std::string& data_to_send)
     {
         if (client_socket == INVALID_SOCKET) {
@@ -64,21 +68,7 @@ bool MetadataTcpClient::SendMetadata(const std::string& data_to_send)
             return false;
         }
 
-        // Format the data as a string: "Alpha,Angle\n"
-        // std::stringstream ss;
-        // ss << roll << "," << pitch << "\n";
-        // std::string data_to_send = ss.str();
-
-        // // Convert string to char array and get size
-        // const char* send_buf = data_to_send.c_str();
-        // size_t send_len = data_to_send.length();
-
-        // // Send the data
-        // ssize_t bytes_sent = send(client_socket, send_buf, send_len, 0);
-
-        
-
-        // 2. Send the data
+        // Send the data
         const char* send_buf = data_to_send.c_str();
         size_t send_len = data_to_send.length();
 
@@ -133,6 +123,8 @@ bool MetadataTcpClient::IsConnected() const
 }
 
 
+// Closes socket_to_close directly if a valid fd is passed; if it's -2 (the default),
+// closes both server_socket and client_socket instead.
 void MetadataTcpClient::CloseConnectionhandler( int socket_to_close)
 {
     if (socket_to_close != INVALID_SOCKET) {
@@ -151,6 +143,11 @@ void MetadataTcpClient::CloseConnectionhandler( int socket_to_close)
     
 }
 
+// Binds and listens on ip:port (TCP), then blocks accepting exactly one incoming
+// connection: stored in server_socket if client == "command_handler", or in
+// client_socket otherwise ("metadata_server"). Not used by the live pipeline
+// (main.cpp uses the UDP variant below for the command handler); kept for a
+// TCP-based command channel if that's preferred over UDP.
 bool MetadataTcpClient::StartConnectionHandlerTCP(const std::string& ip, int port, const std::string client)
 {
     int socet_to_close = (client == "command_handler") ? server_socket : client_socket;
@@ -200,7 +197,6 @@ bool MetadataTcpClient::StartConnectionHandlerTCP(const std::string& ip, int por
 
     socklen_t addrlen = sizeof(address);
     if (client == "command_handler") {
-        // std::cout << "Waiting for server to connect..." << std::endl;
         server_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
         {
             std::ostringstream ss;
@@ -216,7 +212,6 @@ bool MetadataTcpClient::StartConnectionHandlerTCP(const std::string& ip, int por
             return false;
         }
     } else if (client == "metadata_server") {
-        // std::cout << "Waiting for client to connect..." << std::endl;
         client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
         {
             std::ostringstream ss;
@@ -239,6 +234,11 @@ bool MetadataTcpClient::StartConnectionHandlerTCP(const std::string& ip, int por
     return true;
 }
 
+// UDP equivalent of StartConnectionHandlerTCP: binds a UDP socket on ip:port
+// (no listen/accept needed for UDP) and stores it in client_socket. This is what
+// main.cpp actually uses for the "command_handler" channel — receiveCommand() then
+// reads datagrams from it via recvfrom(). Note: unlike the TCP version, the `client`
+// parameter is accepted but unused here (always goes to client_socket regardless).
 bool MetadataTcpClient::StartConnectionHandlerUDP(const std::string& ip, int port, const std::string client)
 {
     // 1. Create a UDP socket (SOCK_DGRAM instead of SOCK_STREAM)
@@ -294,6 +294,7 @@ bool MetadataTcpClient::StartConnectionHandlerUDP(const std::string& ip, int por
     return true;
 }
 
+// Strips trailing whitespace/newlines and leading spaces/tabs from s in place.
 static inline void trim_inplace(std::string& s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
         s.pop_back();
@@ -302,14 +303,14 @@ static inline void trim_inplace(std::string& s) {
     if (i) s.erase(0, i);
 }
 
+// Runs on rxThread (started by startReceiver()): reads UDP datagrams into rxAccum,
+// splits on '\n' into individual commands, and updates the atomic flags
+// (startRepositioning, stopRepositioning, etc.) that main.cpp's loop polls. Exits
+// when runRx is cleared (by stopReceiver()) or the peer disconnects/errors.
 void MetadataTcpClient::receiveCommand() {
     char buf[1024];
 
     while (runRx) {
-        // ssize_t n = recv(client_socket, buf, sizeof(buf), 0);
-        // char buf[1024];
-        // struct sockaddr_in sender_addr;
-        // socklen_t addr_len = sizeof(sender_addr);
         ssize_t n = recvfrom(client_socket, buf, sizeof(buf), 0, (struct sockaddr*)&address, &addr_len);
 
         if (n == 0) {
@@ -333,11 +334,6 @@ void MetadataTcpClient::receiveCommand() {
         while ((pos = rxAccum.find('\n')) != std::string::npos) {
             std::string cmd = rxAccum.substr(0, pos);
             rxAccum.erase(0, pos + 1);
-
-            // std::cout << "RAW cmd bytes: ";
-            // for (unsigned char c : cmd) std::cout << int(c) << ' ';
-            // std::cout << "\nCMD='" << cmd << "'\n";
-
 
             trim_inplace(cmd);
             if (cmd.empty()) continue;
@@ -388,6 +384,8 @@ void MetadataTcpClient::receiveCommand() {
 }
 
 
+// Spawns rxThread running receiveCommand(). No-op if client_socket isn't set up yet
+// (call StartConnectionHandlerUDP/TCP first).
 void MetadataTcpClient::startReceiver() {
     if (client_socket < 0) {
         logger.log("MetadataClient", "No client connected.");
@@ -397,6 +395,8 @@ void MetadataTcpClient::startReceiver() {
     rxThread = std::thread(&MetadataTcpClient::receiveCommand, this);
 }
 
+// Signals receiveCommand() to stop, unblocks it if it's mid-recv (shutdown() on the
+// socket), and joins rxThread.
 void MetadataTcpClient::stopReceiver() {
     runRx = false;
 
@@ -410,6 +410,11 @@ void MetadataTcpClient::stopReceiver() {
 }
 
 // --- Example Usage ---
+// Standalone smoke test for Connect()/SendMetadata() against a listening TCP server.
+// NOTE: this is a free function, not a MetadataTcpClient member — the commented-out
+// main() below calls it as "MetadataTcpClient::TestClient()", which won't compile as
+// written; drop the "MetadataTcpClient::" qualifier (or make this a static member) if
+// you want to actually run this test.
 static void TestClient()
 {
     Logger testLogger("/tmp/MetadataClient_test.log");
@@ -465,186 +470,25 @@ int main()
 }
 */
 
-
-// bool MetadataTcpClient::respositionFuncOld(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, cv::Point3f translation, std::string& data_to_send, bool simulation) {
-
-//         static bool doingTrans =  rotationOnly ? false : true; // if starting in rotation-only mode, start with rotation; otherwise start with translation
-//         static float minRot = 1.0f;
-//         static float minTrans = 10.0f;
-//         static bool hardStop = false;
-//         // static float targetRot = std::min(10.0f, std::max(minRot, rot_error/2)); // start with half the initial error, but cap to 10 to avoid long waits
-//         static cv::Point3f targetRot;
-//         targetRot.x = std::clamp(std::abs(rot_error.x) / 2.0f, minRot, 10.0f);
-//         targetRot.y = std::clamp(std::abs(rot_error.y) / 2.0f, minRot, 10.0f);
-//         targetRot.z = std::clamp(std::abs(rot_error.z) / 2.0f, minRot, 10.0f);
-//         static cv::Point3f targetTrans;
-//         if (simulation){
-//             targetTrans.x = std::clamp(std::abs(translation.x) / 2.0f, minTrans, 100.0f);
-//             targetTrans.y = std::clamp(std::abs(translation.y) / 2.0f, minTrans, 100.0f);
-//             targetTrans.z = std::clamp(std::abs(translation.z) / 2.0f, minTrans, 100.0f);
-//         }
-//         else{
-//             targetTrans.x = std::clamp(std::abs(translation.x) / 2.0f, minTrans, 100.0f);
-//             targetTrans.y = std::clamp(std::abs(translation.y) / 2.0f, minTrans, 100.0f);
-//             targetTrans.z = std::clamp(std::abs(translation.z) / 2.0f, minTrans, 100.0f);
-//         }
-//         static StopDetector detector;
-//         static int increment_switch_x = 0;
-//         static int increment_switch_y = 0;
-//         static int increment_switch_z = 0;
-//         static bool oscillate_x = false;
-//         static bool oscillate_y = false;
-//         static bool oscillate_z = false;
-//         // std::string data_to_send = "";
-//         // if ((rot_error < minRot) && (trans_error < minTrans)) return true;
-//         float trans_error = cv::norm(translation);
-//         if (doingTrans && !rotationOnly && trans_error >= minTrans) {
-//             auto [oscillate_x, oscillate_y, oscillate_z] = detector.update(translation/trans_error);
-//             if (oscillate_x) increment_switch_x++;
-//             else increment_switch_x = 0;
-//             if (oscillate_x) increment_switch_y++;
-//             else increment_switch_y = 0;
-//             if (oscillate_z) increment_switch_z++;
-//             else increment_switch_z = 0;
-//         }
-
-//         if (doingTrans && !rotationOnly){
-//             if ((increment_switch_x > 2) ||  (!simulation && (std::abs(translation.x) < minTrans))) {
-//                 translation_rate.x = 0;
-//                 translation.x = 0;
-//                 // doingTrans = false;
-//                 if (std::abs(translation.x) < 20) oscillate_x = true;
-//             }
-//             if (increment_switch_y > 2 || ((std::abs(translation.x) < minTrans)&&simulation) || (!simulation && (std::abs(translation.y) < minTrans))) {
-//                 translation_rate.y = 0;
-//                 translation.y = 0;
-//                 // doingTrans = false;
-//                 if (std::abs(translation.y) < 20) oscillate_y = true;
-//             }
-//             if (increment_switch_z > 2 || ((std::abs(translation.z) < minTrans)&& simulation) ) {
-//                 translation_rate.z = 0;
-//                 translation.z = 0;
-//                 // doingTrans = false;
-//                 if (std::abs(translation.z) < 20) oscillate_z = true;
-//             }
-//         }
-//         if (hardStop){
-//             translation = cv::Point3f(0.0f, 0.0f, 0.0f);
-//             translation_rate = cv::Point3f(0.0f, 0.0f, 0.0f);
-//             // transError = 0;
-//             doingTrans = false;
-//             // translationOnly = false;
-//             // rotationOnly = true;
-//         }
-
-//         {
-//             std::ostringstream ss;
-//             ss << "Increment switch: " << increment_switch_x << ", " << increment_switch_y << ", " << increment_switch_z;
-//             logger.log("MetadataClient", ss.str());
-//         }
-
-//         trans_error = cv::norm(translation);
-              
-//         if (!doingTrans && !translationOnly  && !simulation) { 
-//             if ((std::abs(rot_error.y) < targetRot.y) && (std::abs(rot_error.z) < targetRot.z) ) {
-//                 doingTrans = rotationOnly ? false : true; // if in rotation-only mode, stay in rotation; otherwise switch to translation
-//                 targetRot.x = std::max(targetRot.x/2, minRot);
-//                 targetRot.y = std::max(targetRot.y/2, minRot);
-//                 targetRot.z = std::max(targetRot.z/2, minRot);
-//                 increment_switch_x = 0; 
-//                 increment_switch_y = 0;
-//                 increment_switch_z = 0;
-//             }
-//             else {
-//                 std::stringstream ss;
-//                 float roll = 0;
-//                 float pitch = rotation_rate.y;
-//                 float yaw = rotation_rate.z;
-//                 // if (rot_error.x < targetRot.x) roll = 0;
-//                 if (std::abs(rot_error.y) < targetRot.y) pitch = 0;
-//                 if (std::abs(rot_error.z) < targetRot.z) yaw = 0;
-//                 ss << roll << "," << pitch << "," << yaw << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-//                 data_to_send = ss.str();
-//                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
-//                     logger.log("MetadataClient", "Could not send data");
-//                 }
-//             }
-//         }
-//         if (!doingTrans && !translationOnly  && simulation) { 
-//             if ((std::abs(rot_error.y) < targetRot.y) && (std::abs(rot_error.x) < targetRot.x) ) {
-//                 doingTrans = rotationOnly ? false : true; // if in rotation-only mode, stay in rotation; otherwise switch to translation
-//                 targetRot.x = std::max(targetRot.x/2, minRot);
-//                 targetRot.y = std::max(targetRot.y/2, minRot);
-//                 targetRot.z = std::max(targetRot.z/2, minRot);
-//                 increment_switch_x = 0; 
-//                 increment_switch_y = 0;
-//                 increment_switch_z = 0;
-//             }
-//             else {
-//                 std::stringstream ss;
-//                 float roll = 0;
-//                 float pitch = rotation_rate.x;
-//                 float yaw = rotation_rate.y;
-//                 // if (rot_error.x < targetRot.x) roll = 0;
-//                 if (std::abs(rot_error.x) < targetRot.x) pitch = 0;
-//                 if (std::abs(rot_error.y) < targetRot.y) yaw = 0;
-//                 ss << roll << "," << pitch << "," << yaw << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
-//                 data_to_send = ss.str();
-//                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
-//                     logger.log("MetadataClient", "Could not send data");
-//                 }
-//             }
-//         }
-//         else if(doingTrans && !rotationOnly) {
-            
-//             if ((std::abs(translation.x) < targetTrans.x) && (std::abs(translation.y) < targetTrans.y) && (std::abs(translation.z) < targetTrans.z) ) {
-//                 doingTrans = translationOnly ? true : false; // if in translation-only mode, stay in translation; otherwise switch to rotation
-//                 targetTrans.x = std::max(targetTrans.x/2, minTrans);
-//                 targetTrans.y = std::max(targetTrans.y/2, minTrans);
-//                 targetTrans.z = std::max(targetTrans.z/2, minTrans);
-//             }
-//             else {
-//                 std::stringstream ss;
-//                 ss << 0 << "," << 0 << "," << 0 << "," << translation_rate.x << "," << translation_rate.y << "," << translation_rate.z << "," << "1" << "\n";
-//                 data_to_send = ss.str();
-//                 if (!MetadataTcpClient::SendMetadata(data_to_send)){
-//                     logger.log("MetadataClient", "Could not send data");
-//                 }
-//             }
-//         }
-//         // std::cout << "Target rotation error " << targetRot << " and Target translation error " << targetTrans << std::endl;
-//         // std::cout << "Rotation error " << rot_error << " and translation error " << trans_error << std::endl;
-//         hardStop = oscillate_x && oscillate_y && oscillate_z;
-//         bool rot_err = (std::abs(rot_error.y) <= minRot) && (std::abs(rot_error.z) <= minRot);
-//         bool trans_err_bool = (std::abs(translation.x) <= minTrans) && (std::abs(translation.y) <= minTrans) && (std::abs(translation.z) <= minTrans);
-//         if (hardStop) trans_err_bool = true;
-//         bool state = ( rot_err || translationOnly ) && (trans_err_bool || rotationOnly );
-//         // hardStop = oscillate_x && oscillate_y && oscillate_z && state;
-//         // std::cout << "rotation state: " << rot_err << " and state of result: " << state << std::endl;
-//         return state;
-//     }
-
-
+// Converts rate/error into a "roll,pitch,yaw,vx,vy,vz,0" command string: zeroes out
+// each axis once its error falls under the minRot/minTrans deadband (so the drone
+// doesn't jitter around the target), sends it via SendMetadata(), and returns true
+// once every axis is zeroed (i.e. within tolerance on both rotation and translation).
+// Note: `simulation` is accepted (main.cpp passes unrealTest here) but currently
+// unused — the deadband/command logic is the same for both simulation and hardware.
 bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, cv::Point3f trans_error, std::string& data_to_send, bool simulation) {
-    // static int64 time_init = static_cast<float>(cv::getTickCount());
-    // int64 time_now = static_cast<float>(cv::getTickCount());
-    // double time_diff = (time_now - time_init) / cv::getTickFrequency();
     static float minRot = 1.0f;
     static float minTrans = 1.0f;
-    static bool hardStop = false;
     float roll = 0;
-    // float pitch = 0;
-    // float yaw = 0;
     float pitch = rotation_rate.y;
     float yaw = rotation_rate.z;
     if (std::abs(rot_error.y) < minRot) pitch = 0;
     if (std::abs(rot_error.z) < minRot) yaw = 0;
- 
+
     float x = translation_rate.x;
     float y = translation_rate.y;
     float z = translation_rate.z;
-    // if (rot_error.x < targetRot.x) roll = 0;
-    
+
     if (std::abs(trans_error.x) < minTrans) x = 0;
     if (std::abs(trans_error.y) < minTrans) y = 0;
     if (std::abs(trans_error.z) < minTrans) z = 0;

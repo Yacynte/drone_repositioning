@@ -11,15 +11,21 @@
 #include <vector>
 
 
+// Structured, buffered CSV logger for per-frame repositioning data (error, rotation,
+// translation, and the parsed outgoing command). One row is written per call to
+// log(); see writeHeader() for the exact column layout. Buffers lines in memory and
+// flushes to disk every flush_every_n rows (or via flush()/the destructor) to keep
+// disk I/O off the hot path.
 class AlgoLogger {
 public:
-    // using Clock = std::chrono::steady_clock;
-
+    // Mirrors the 6 numeric fields of the "roll,pitch,yaw,vx,vy,vz,state" command
+    // string sent to the drone/Unreal Engine (see MetadataTcpClient::respositionFunc).
     struct Command6 {
-        // matches: ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << cmd_vx.z
         double c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0;
     };
 
+    // Opens csv_path in append mode. Writes the CSV header if the file is new/empty
+    // and write_header is true. Throws std::runtime_error if the file can't be opened.
     explicit AlgoLogger(std::string csv_path,
                         bool write_header = true,
                         size_t flush_every_n = 60,
@@ -45,18 +51,16 @@ public:
         out_.close();
     }
 
-    // Timestamp helpers: seconds from steady_clock start
-    // static double nowSec() {
-    //     const auto t = Clock::now().time_since_epoch();
-    //     return std::chrono::duration<double>(t).count();
-    // }
+    // Current wall-clock time as fractional seconds since the Unix epoch.
     static double nowWallSec() {
         auto t = std::chrono::system_clock::now().time_since_epoch();
         return std::chrono::duration<double>(t).count();
     }
 
 
-    // Parse a command string like: "0,0,0,0,0,1.23\n"
+    // Parses a "c0,c1,c2,c3,c4,c5,state\n" command string (7 comma-separated numbers;
+    // the trailing `state` field is parsed but not stored) into a Command6. Returns
+    // std::nullopt if cmd isn't exactly 7 well-formed numbers.
     static std::optional<Command6> parseCommand6(const std::string& cmd) {
         Command6 c;
         std::stringstream ss(cmd);
@@ -83,39 +87,26 @@ public:
         return c;
     }
 
-    // Main logging call:
-    // - img_ts: when image was received (seconds)
-    // - send_ts: when reply was sent (seconds)
-    // - rvec: rotation vector (Rodrigues) or just any 3-float vector
-    // - t_px: translation in pixels
-    // - cmd_raw: the exact string you sent (optional, recommended)
-    // - cmd_parsed: parsed numeric command fields (optional)
+    // Appends one CSV row for the current frame:
+    // - send_ts: wall-clock time the command was computed/sent (seconds)
+    // - px_error: alignment/reprojection error (see writeHeader() for the column name)
+    // - rvec: estimated rotation error (roll, pitch, yaw, degrees)
+    // - unit_vec: normalized translation direction
+    // - cmd_parsed: the 6 numeric fields of the outgoing drone command, or nullopt if
+    //   this frame's alignment failed (writes an all-empty row in that case)
     void log(double send_ts,
              float px_error,
              const cv::Point3f& rvec,
-            //  const cv::Point2f& t_px,
              const cv::Point3f& unit_vec,
-            //  const std::string& cmd_raw = "",
              const std::optional<Command6>& cmd_parsed = std::nullopt)
     {
         std::ostringstream line;
         line.setf(std::ios::fixed);
-        // line << std::setprecision(6)
-        //      << img_ts << ","
-        //      << send_ts << ","
-        //      << std::setprecision(3) << dt_ms << ","
-             
-            //  << rvec.x << "," << rvec.y << "," << rvec.z << ","
-            //  << std::setprecision(3)
-            //  << t_px.x << "," << t_px.y << "," << t_px.z << ",";
 
-        // command numeric fields (6 columns). If not provided, write empty
         if (cmd_parsed) {
             line << std::setprecision(6)
              << send_ts << ","
              << std::setprecision(3) << px_error << ","
-            //  << std::setprecision(3)
-            //  << t_px.x << "," << t_px.y << ","
              << std::setprecision(3)
              << unit_vec.x << "," << unit_vec.y << "," << unit_vec.z << ","
              << std::setprecision(3)
@@ -128,12 +119,10 @@ public:
             line << ",,,,,, \n";
         }
 
-        // raw command as a quoted CSV cell (escape quotes)
-        // line << quoteCsv(cmd_raw) << "\n";
-
         writeLine(line.str());
     }
 
+    // Writes any buffered rows to disk immediately, regardless of flush_every_n.
     void flush() {
         lock_();
         out_ << buffer_;
@@ -152,6 +141,7 @@ private:
     bool thread_safe_ = true;
     std::mutex mtx_;
 
+    // Writes the CSV column header row (called once, on first open of a new file).
     void writeHeader() {
         out_ << "send_ts,repo_error,px_error_x, px_error_y,"
                 "unit_vec_x, unit_vec_y, unit_vec_z,"
@@ -159,6 +149,8 @@ private:
                 "w_x,w_y,w_z,v_x,v_y,v_z\n";
     }
 
+    // Appends s to the in-memory buffer and flushes to disk once flush_every_n lines
+    // have accumulated.
     void writeLine(const std::string& s) {
         lock_();
         buffer_ += s;
@@ -175,8 +167,10 @@ private:
     void lock_()   { if (thread_safe_) mtx_.lock(); }
     void unlock_() { if (thread_safe_) mtx_.unlock(); }
 
+    // CSV-quotes a raw string (wraps in double quotes, escapes embedded quotes by
+    // doubling them). Not currently used by log() but kept for logging raw command
+    // strings if that's ever added back.
     static std::string quoteCsv(const std::string& in) {
-        // CSV quote with "..." and escape quotes by doubling
         std::string out;
         out.reserve(in.size() + 2);
         out.push_back('"');

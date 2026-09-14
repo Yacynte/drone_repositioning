@@ -1,3 +1,19 @@
+"""
+Runs continuously alongside the C++ ImageMatcher app (launched by main.cpp via
+launch_python_posix), matching each incoming camera frame against a fixed target
+image using ONNX-exported SuperPoint (keypoint detection) + LightGlue (matching).
+
+Two POSIX shared-memory segments tie this process to the C++ side:
+  - shm_name ("single_frame_shm", written by RtspReader in RstpReader.cpp): the
+    latest grayscale camera frame. See _get_latest_frame().
+  - SHM_NAME_MATCHES ("sp_sg_matches", read by SPSGReader in Matches.hpp): this
+    process's match results (keypoints + scores + per-match covariance) for the
+    latest frame. See _write_matches() for the exact byte layout (must match
+    SPSGReader::parse() in Matches.hpp).
+
+Entry point: run() loops forever, pulling frames and writing matches, until either
+the C++ side sets is_alive=0 on the frame segment or this process is killed.
+"""
 import numpy as np
 import cv2
 import struct
@@ -8,6 +24,10 @@ import onnxruntime as ort
 from multiprocessing import shared_memory
 
 class FeatureMatcherONNX:
+    # Loads the SuperPoint/LightGlue ONNX models, opens/creates both shared-memory
+    # segments, and extracts+caches SuperPoint features for target_image_path (see
+    # set_target()). shm_name must match the segment name RtspReader was constructed
+    # with on the C++ side.
     def __init__(self, target_image_path, shm_name="single_frame_shm"):
         self.running = True
         self.WIDTH = 1920
@@ -26,11 +46,9 @@ class FeatureMatcherONNX:
         
         try:
             self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES)
-            # print(f"[Attached] {self.SHM_NAME_MATCHES}")
         except FileNotFoundError:
             self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES, create=True, size=self.SHM_SIZE_MATCHES)
-            # print(f"[Created] {self.SHM_NAME_MATCHES}")
-        
+
         self.buf = self.shm.buf
         self.buf[0] = 1 
 
@@ -41,12 +59,21 @@ class FeatureMatcherONNX:
         self.last_processed_frame_id = -1
 
         # ── ONNX Runtime Session with TensorRT Provider ─────────────────────────
+        # NOTE: hardcoded absolute paths (including the "user" account name) rather
+        # than a path relative to this script or an expanded "~" like the C++ side
+        # uses (see expandUser() in Utils.cpp) — will break if deployed under a
+        # different username or install location.
         self.sp_session = self.get_session("/home/user/drone_repositioning/weights/superpoint.onnx", provider="auto")
         self.lg_session = self.get_session("/home/user/drone_repositioning/weights/lightglue_patched.onnx", provider="auto")
 
         # Extract and cache target features — call again to switch target
         self.set_target(target_image_path)
 
+    # Builds an onnxruntime InferenceSession for model_path with the requested
+    # execution provider. "auto" prefers CUDA when available, else falls back to
+    # CPU. A commented-out TensorRT branch is left in place (both here and under
+    # "auto") as a starting point for enabling TRT once its engine-cache setup is
+    # verified on target hardware.
     def get_session(self, model_path, provider="auto"):
         available = ort.get_available_providers()
         
@@ -95,16 +122,12 @@ class FeatureMatcherONNX:
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
-        # print("[FeatureMatcher] Available:", available)
-        # print("[FeatureMatcher] Requested:", providers)
-
         session = ort.InferenceSession(
             model_path,
             sess_options=sess_options,  # Pass the customized options here
             providers=providers,
         )
 
-        # print("[FeatureMatcher] Active:", session.get_providers())
         return session
 
 
@@ -117,7 +140,6 @@ class FeatureMatcherONNX:
 
         (self.target_kpts, self.target_desc, self.target_scores, self.target_mask, 
                             self.target_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': tensor}))
-        # print(f"[Target] {target_image_path} → {self.target_kpts.shape[1]} keypoints cached")
 
     def pad_superpoint(self, kpts, desc, scores):
         """
@@ -170,9 +192,18 @@ class FeatureMatcherONNX:
 
         return kpts, desc, scores, mask, n
 
+    # Intended as a signal handler to stop run()'s loop gracefully, but it's never
+    # registered (no signal.signal(...) call anywhere) — currently dead code. In
+    # practice Ctrl+C still works because Python's default SIGINT handling raises
+    # KeyboardInterrupt, which propagates out of run()'s while loop into its `finally:
+    # self._cleanup()`.
     def _shutdown(self, sig=None, frame=None):
         self.running = False
 
+    # Blocks (busy-polling every 1ms) until RtspReader (C++ side) publishes a frame
+    # with a new frame_id, then copies it out of shared memory under the is_reading
+    # flag so a concurrent write can't tear it. Returns (None, -1) if the C++ side
+    # has set is_alive=0 (shutting down) — this is what ends run()'s main loop.
     def _get_latest_frame(self):
         is_alive, is_writing, is_reading = struct.unpack_from("BBB", self.buf_frames, 0)
         frame_id, _, _ = struct.unpack_from("<III", self.buf_frames, 4)
@@ -182,7 +213,6 @@ class FeatureMatcherONNX:
 
         while frame_id == self.last_processed_frame_id or is_writing == 1:
             time.sleep(0.001)
-            # print(f"[FeatureMatcher] waiting for frame from c++")
             is_writing = self.buf_frames[1]
             frame_id = struct.unpack_from("<I", self.buf_frames, 4)[0]
 
@@ -196,6 +226,11 @@ class FeatureMatcherONNX:
 
         return frame_np, frame_id
 
+    # Thresholds matches by min_score, then buckets the survivors into a
+    # rows x cols grid over the target image (by their mkpts1 position) and keeps
+    # only the top per_cell (by score) in each cell — the same "spread matches across
+    # the image instead of clustering" idea as ImageMatcher::gridFilterMatches on the
+    # C++ side, just applied to LightGlue's output instead of SIFT's.
     def _filter_by_grid(self, mkpts0, mkpts1, mscores, rows=2, cols=3, per_cell=25, min_score=0.75):
         if len(mscores) == 0:
             return mkpts0, mkpts1, mscores
@@ -246,7 +281,16 @@ class FeatureMatcherONNX:
         return mkpts0_v[idx], mkpts1_v[idx], mscores_v[idx]
 
     def _compute_patch_covariances_numpy(self, img, keypoints, patch_size=5, eps=1e-3):
-        """Optimized NumPy/CPU alternative for PNEC covariance computation."""
+        """
+        Estimates a 2D pixel covariance per keypoint from the local image-gradient
+        structure tensor (same idea as ImageMatcher::compute_point_covariances in
+        ImageMatcher.cpp), vectorized with NumPy instead of a per-pixel C++ loop.
+        Returns an (N, 3) array of (xx, xy, yy) — the packed upper triangle of each
+        2x2 covariance — which _write_matches() sends as-is; the C++ side
+        (ImageMatcher::getAlignment) unpacks it back into a cv::Matx22f. Points too
+        close to the image border to have a full patch get an identity-ish fallback
+        covariance (1, 0, 1).
+        """
         gy, gx = np.gradient(img)
         Ixx, Iyy, Ixy = gx * gx, gy * gy, gx * gy
         half_w = patch_size // 2
@@ -276,6 +320,11 @@ class FeatureMatcherONNX:
         covs[~valid] = [1.0, 0.0, 1.0]
         return covs
 
+    # Main loop: pull the latest frame, run SuperPoint on it, match against the
+    # cached target features with LightGlue, filter/rescale the matches, estimate a
+    # per-match covariance, and publish the result. Runs until _get_latest_frame()
+    # signals the C++ side has shut down, then always calls _cleanup() (including on
+    # an unhandled exception or Ctrl+C).
     def run(self):
         try:
             while self.running:
@@ -285,15 +334,11 @@ class FeatureMatcherONNX:
                 cur_image = cv2.resize(cur_image_, (self.superpointWidth, self.superpointHeight), interpolation=cv2.INTER_AREA)
                 # Preprocess frame to match model expectations [1, 1, H, W]
                 cur_tensor = cur_image.astype(np.float32) / 255.0
-                # cur_tensor = np.expand_dims(np.expand_dims(cur_tensor, 0), 0)
                 cur_tensor = cur_tensor[None, None]
                 # Step 1: extract current frame features
-                # kpts0_, desc0_, scores0_ = self.sp_session.run( None, {'image': cur_tensor})
-                (kpts0, desc0, scores0, cur_mask, 
+                (kpts0, desc0, scores0, cur_mask,
                                             cur_num_keypoints) = self.pad_superpoint(*self.sp_session.run(None, {'image': cur_tensor}))
-                # kpts0, desc0, scores0 = self._pad_features(kpts0_, desc0_, scores0_)
                 # Step 2: match against cached target features
-                # print(f"[FeatureMatcher] Keypoints found : {cur_num_keypoints}")
                 outputs = self.lg_session.run(None, {
                     'kpts0':   kpts0,   'desc0':   desc0,   'scores0': scores0,
                     'kpts1':   self.target_kpts, 'desc1':   self.target_desc, 'scores1': self.target_scores })
@@ -306,15 +351,12 @@ class FeatureMatcherONNX:
                     (matches0 >= 0) &
                     (matches0 < self.target_num_keypoints)
                 )
-                # valid = matches0 >= 0
 
                 idx0 = np.where(valid)[0]
                 idx1 = matches0[valid]
                 scores = scores0[valid]
 
-                # matches = np.stack([idx0, idx1], axis=1)
-
-                mkpts0 = kpts0[0][idx0] 
+                mkpts0 = kpts0[0][idx0]
                 mkpts1 = self.target_kpts[0][idx1]
 
                 # scale back to original resolution
@@ -324,13 +366,17 @@ class FeatureMatcherONNX:
                 mkpts1[:, 1] *= self.ratio_height
 
                 mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
-                # print(f"[FeatureMatcher] matches found: {len(scores)}")
                 covariances = self._compute_patch_covariances_numpy(cur_image_, mkpts0_filtered)
                 self._write_matches(mkpts0_filtered, mkpts1_filtered, scores_filtered, covariances)
 
         finally:
             self._cleanup()
 
+    # Serializes up to MAX_KP_MATCHES matches into the sp_sg_matches shared-memory
+    # segment: [is_alive][py_writing][is_reading][frame_id:u32][N:u32][mkpts0 Nx2f32]
+    # [mkpts1 Nx2f32][mscores Nf32][covariances Nx3f32], guarded by the py_writing/
+    # is_reading handshake so SPSGReader (Matches.hpp, C++ side) never reads a torn
+    # payload. This layout MUST stay in sync with SPSGReader::parse() in Matches.hpp.
     def _write_matches(self, mkpts0, mkpts1, mscores, covariances):
         N = min(len(mscores), self.MAX_KP_MATCHES)
         mkpts0 = mkpts0[:N].astype(np.float32)
@@ -352,8 +398,9 @@ class FeatureMatcherONNX:
         self.buf[offset:offset + N*4] = mscores.tobytes(); offset += N*4
         self.buf[offset:offset + N*12] = covariances.tobytes()
         self.buf[1] = 0
-        # print(f"Wrote matches to shared memory")
 
+    # Signals is_alive=0 on the matches segment (so SPSGReader knows to stop) and
+    # releases both shared-memory handles.
     def _cleanup(self):
         self.shm_frames.close()
         self.buf[0] = 0
