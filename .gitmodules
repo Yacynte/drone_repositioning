@@ -1,3 +1,6 @@
 [submodule "LighGlue-ONNX"]
 	path = LighGlue-ONNX
 	url = https://github.com/fabio-sim/LightGlue-ONNX.git
+[submodule "controls"]
+	path = controls
+	url = https://github.com/Yacynte/repositioning_controls.git
