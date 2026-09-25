@@ -2,7 +2,7 @@
 #include <iostream>
 #include <iostream>
 #include <cstring>
-
+#include "Utils.h"
 
 MetadataTcpClient::MetadataTcpClient(Logger& logger): logger(logger) {}
 

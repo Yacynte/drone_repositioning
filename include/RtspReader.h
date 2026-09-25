@@ -52,6 +52,8 @@ public:
     void start(cv::VideoCapture* externalCap = nullptr);
     // Signals the reader thread to stop and joins it.
     void stop();
+    // Writes the latest colour frame to imageEnd<start_time>.png (once).
+    void saveEndImage();
     // Returns the most recently published frame and whether a new frame was actually
     // available since the last call.
     std::tuple<cv::Mat, bool> getFrame();
@@ -81,6 +83,7 @@ private:
     bool frameMemoryReady_ = false;
     std::string shm_name_frame_;
     bool start_rec = true;
+    bool endImageSaved_ = false;
     cv::Mat frame;
     int fd_{-1};
     uint8_t* shm_ptr_{nullptr};
@@ -124,7 +127,9 @@ private:
     std::atomic<bool> running_{false};
 
     std::mutex frameMutex_;
+    std::mutex frameColourMutex_;
     cv::Mat lastFrame_;
+    cv::Mat lastColourFrame_;
 
     FILE* pipe_{nullptr};
 };

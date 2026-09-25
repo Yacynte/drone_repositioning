@@ -493,6 +493,8 @@ int main(int argc, char** argv) {
         
         if (atTarget && ((currentTime - arrivalTime > 1.0) ) && arrivalTime > 0.0) {
             appLogger.log("main", "Maintained target position for 2 seconds, stopping repositioning");
+            // Save the end image before the -1 command: the controller may kill us once it gets it.
+            reader.saveEndImage();
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
             std::string data_to_send = ss.str();

@@ -29,34 +29,34 @@ class FeatureMatcherONNX:
     # set_target()). shm_name must match the segment name RtspReader was constructed
     # with on the C++ side.
     def __init__(self, target_image_path, shm_name="single_frame_shm"):
-        self.running = True
-        self.WIDTH = 1920
-        self.HEIGHT = 1080
+        # self.running = True
+        # self.WIDTH = 1920
+        # self.HEIGHT = 1080
 
-        self.superpointWidth = 640
-        self.superpointHeight = 480
+        # self.superpointWidth = 640
+        # self.superpointHeight = 480
 
-        self.ratio_height = self.HEIGHT / self.superpointHeight
-        self.ratio_width = self.WIDTH / self.superpointWidth
+        # self.ratio_height = self.HEIGHT / self.superpointHeight
+        # self.ratio_width = self.WIDTH / self.superpointWidth
 
-        # ── Matches shared memory setup (Kept identical to yours) ────────────────
-        self.SHM_NAME_MATCHES = "sp_sg_matches"
-        self.MAX_KP_MATCHES = 512
-        self.SHM_SIZE_MATCHES = 1 + 1 + 1 + 4 + 4 + self.MAX_KP_MATCHES * (2 + 2 + 1 + 3) * 4
+        # # ── Matches shared memory setup (Kept identical to yours) ────────────────
+        # self.SHM_NAME_MATCHES = "sp_sg_matches"
+        # self.MAX_KP_MATCHES = 512
+        # self.SHM_SIZE_MATCHES = 1 + 1 + 1 + 4 + 4 + self.MAX_KP_MATCHES * (2 + 2 + 1 + 3) * 4
         
-        try:
-            self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES)
-        except FileNotFoundError:
-            self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES, create=True, size=self.SHM_SIZE_MATCHES)
+        # try:
+        #     self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES)
+        # except FileNotFoundError:
+        #     self.shm = shared_memory.SharedMemory(name=self.SHM_NAME_MATCHES, create=True, size=self.SHM_SIZE_MATCHES)
 
-        self.buf = self.shm.buf
-        self.buf[0] = 1 
+        # self.buf = self.shm.buf
+        # self.buf[0] = 1 
 
-        # ── Frame shared memory setup ───────────────────────────────────────────
-        self.HEADER_SIZE = 1 + 1 + 1 + 1 + 4 + 4 + 4
-        self.shm_frames = shared_memory.SharedMemory(name=shm_name)
-        self.buf_frames = self.shm_frames.buf
-        self.last_processed_frame_id = -1
+        # # ── Frame shared memory setup ───────────────────────────────────────────
+        # self.HEADER_SIZE = 1 + 1 + 1 + 1 + 4 + 4 + 4
+        # self.shm_frames = shared_memory.SharedMemory(name=shm_name)
+        # self.buf_frames = self.shm_frames.buf
+        # self.last_processed_frame_id = -1
 
         # ── ONNX Runtime Session with TensorRT Provider ─────────────────────────
         # NOTE: hardcoded absolute paths (including the "user" account name) rather
@@ -232,7 +232,7 @@ class FeatureMatcherONNX:
     # only the top per_cell (by score) in each cell — the same "spread matches across
     # the image instead of clustering" idea as ImageMatcher::gridFilterMatches on the
     # C++ side, just applied to LightGlue's output instead of SIFT's.
-    def _filter_by_grid(self, mkpts0, mkpts1, mscores, rows=2, cols=3, per_cell=25, min_score=0.50):
+    def _filter_by_grid(self, mkpts0, mkpts1, mscores, rows=2, cols=3, per_cell=25, min_score=0.75):
         if len(mscores) == 0:
             return mkpts0, mkpts1, mscores
         

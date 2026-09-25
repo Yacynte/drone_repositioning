@@ -1,5 +1,5 @@
 #include "RtspReader.h"
-
+#include "Utils.h"
 // When unreal_test is true and url contains "tcp", parses "tcp <ip> <port>" out of
 // url and opens a TCP connection now (frames are pulled later by TcpReaderLoop()).
 // When unreal_test is true but url doesn't look like a TCP address, instead builds
@@ -194,13 +194,35 @@ void RtspReader::start(cv::VideoCapture* externalCap) {
     
 }
 
-// Saves the last raw frame as an "end" snapshot, stops the background loop/thread
+// Saves the latest colour frame as the "end" snapshot. Only the first call writes;
+// later calls (e.g. the one from stop()) are no-ops. main.cpp calls this before
+// sending the final stop command, since the controller may kill the process soon after.
+void RtspReader::saveEndImage() {
+    if (endImageSaved_) return;
+    endImageSaved_ = true;
+
+    std::string img = logImages_ + "imageEnd" + start_time + ".png";
+
+    cv::Mat lastFrame;
+    {
+        std::lock_guard<std::mutex> lock(frameColourMutex_);
+        lastFrame = lastColourFrame_.clone();
+    }
+    // Write to a temp file and rename, so a kill mid-encode never leaves a
+    // truncated imageEnd*.png behind.
+    if (!lastFrame.empty()) {
+        std::string tmp = img + ".tmp.png";
+        if (cv::imwrite(tmp, lastFrame))
+            std::rename(tmp.c_str(), img.c_str());
+        else
+            logger.log("RtspReader", "error: failed to write " + img);
+    }
+}
+
+// Saves the end snapshot (if not already saved), stops the background loop/thread
 // (and the ffmpeg pipe if one is running), and tears down the shared-memory segment.
 void RtspReader::stop() {
-    {
-        std::string img = logImages_ + "imageEnd" + start_time + ".png";
-        cv::imwrite(img, frame);
-    }
+    saveEndImage();
 
     running_ = false;
     if (unreal_test_){
@@ -275,6 +297,10 @@ void RtspReader::readerLoop() {
         {
             std::lock_guard<std::mutex> lock(frameMutex_);
             grayFrame.copyTo(lastFrame_);
+        }
+        {
+            std::lock_guard<std::mutex> lock(frameColourMutex_);
+            frame.copyTo(lastColourFrame_);
         }
         
         write_frame(grayFrame);
@@ -405,6 +431,10 @@ void RtspReader::DroneReaderLoop(){
             std::lock_guard<std::mutex> lock(frameMutex_);
             grayFrame.copyTo(lastFrame_);
         }
+        {
+            std::lock_guard<std::mutex> lock(frameColourMutex_);
+            frame.copyTo(lastColourFrame_);
+        }
 
         write_frame(grayFrame);
     }
@@ -439,6 +469,10 @@ void RtspReader::TcpReaderLoop() {
                 {
                     std::lock_guard<std::mutex> lock(frameMutex_);
                     grayFrame.copyTo(lastFrame_);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(frameColourMutex_);
+                    frame.copyTo(lastColourFrame_);
                 }
                 write_frame(grayFrame);
             }

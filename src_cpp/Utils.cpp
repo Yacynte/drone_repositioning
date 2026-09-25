@@ -255,7 +255,7 @@ int getInt(const std::unordered_map<std::string,std::string>& kv,
 
 // Convert a double to a string where the decimal point is replaced with '_'.
 // Example: 11829.695398 -> "11829_695398"
-std::string timeToUnderscoreString(int precision) {
+std::string timeToString(int precision) {
     const auto t_now = std::chrono::system_clock::now().time_since_epoch();
     double value = std::chrono::duration<double>(t_now).count();
     std::ostringstream oss;

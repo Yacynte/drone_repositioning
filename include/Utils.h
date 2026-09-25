@@ -100,7 +100,7 @@ int getInt(const std::unordered_map<std::string,std::string>& kv,
 // Formats the current wall-clock time as a fractional Unix timestamp with '.'
 // replaced by '_' (e.g. 11829.695398 -> "11829_695398"). Unused by the live pipeline
 // (which uses the no-arg overload below); kept for reference.
-std::string timeToUnderscoreString(int precision = 6);
+std::string timeToString(int precision = 6);
 // Formats the current local time as "YYYY_MM_DD_HH_MM_SS", used to name log files
 // (see main.cpp) and per-frame saved images (see RstpReader.cpp).
 std::string timeToUnderscoreString();
