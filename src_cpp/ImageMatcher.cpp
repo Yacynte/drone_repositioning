@@ -1,7 +1,11 @@
 #include "ImageMatcher.h"
 #include <opencv2/opencv.hpp>
 #include <opencv2/features2d.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <chrono>
 #include <iostream>
+#include <algorithm>
+#include <sstream>
 #include "Utils.h"
 
 
@@ -1072,13 +1076,15 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
 //      see pnecOptimizer.hpp) to get the rotation R and translation direction t_dir.
 //      R and t_init/t_dir are member variables, so each call seeds the solver with
 //      the previous frame's result for faster convergence.
-//   4. Score the result with the Sampson pixel error (getSampsonPixelError) as a
-//      confidence/quality metric returned to main.cpp; errors under 1px are inflated
-//      x100 so downstream thresholds (main.cpp's transError-based logic) treat a
-//      near-zero fit as "very good" rather than being swamped by numerical noise.
+//   4. Return the position-error magnitude as the median de-rotated parallax in
+//      pixels (see the end of this function); main.cpp scales t_dir by it. The
+//      Sampson pixel error is only logged, as a fit-quality diagnostic.
 std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const Matches& matchedPoints, const cv::Mat& frame){
 
-    pnec::RelativePoseEstimatorOld estimator(logger, K);
+    // pnec::RelativePoseEstimator estimator(logger, K);
+    const auto tAlignStart = std::chrono::steady_clock::now();
+    pnec::PNECEstimator estimator(logger, K); 
+    flowFit_ = eccFit_ = TranslationFit{};   // stale fits must not survive an early return
 
     if(!matchedPoints.newMatches && !frame.empty()){
         TrackingResult trackingResult = track_features(frame, targetImageGray, targetMatches_);
@@ -1099,10 +1105,14 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
         targetMatches = matchedPoints.kpts1;
         targetMatches_ = matchedPoints.kpts1;
         if(matchedPoints.n > 8){
+            // covariances is a member: clear it, or match i keeps reading the first
+            // frame's covariance (push_back only ever appended).
+            covariances.clear();
             for(auto cov : matchedPoints.covariances){
                 cv::Matx22f H(cov.x, cov.y, cov.y, cov.z);
 
-                // Inverse Hessian = 2D Covariance Matrix Sigma_2D
+                // Python sends the structure tensor H (not its inverse); the single
+                // inversion here gives the 2D covariance Sigma_2D = H^-1.
                 covariances.push_back(H.inv(cv::DECOMP_SVD));
             }
         }
@@ -1121,24 +1131,116 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
         Eigen::Matrix2d cov2d;
         cov2d << covariances[i](0,0), covariances[i](0,1),
                 covariances[i](1,0), covariances[i](1,1);
-        m.cov3d = ut.propagate2DTo3D(cov2d, K);
+        m.cov3d = ut.propagate2DTo3D(cov2d, K, Eigen::Vector2d(inputMatches[i].x, inputMatches[i].y));
         matches.push_back(m);
     }
 
+    // Covariance-scale diagnostic: per-match RMS pixel std sqrt(trace(Sigma_2D)/2),
+    // logged as p10/median/p90 per frame, to pick a global scale factor for Sigma_2D
+    // (H^-1 from raw intensity gradients is not in px^2 of matching noise).
+    {
+        std::vector<double> stdPx;
+        stdPx.reserve(covariances.size());
+        for (size_t i = 0; i < inputMatches.size() && i < covariances.size(); i++) {
+            stdPx.push_back(std::sqrt(0.5 * (covariances[i](0,0) + covariances[i](1,1))));
+        }
+        if (!stdPx.empty()) {
+            std::sort(stdPx.begin(), stdPx.end());
+            auto at = [&](double q) { return stdPx[static_cast<size_t>(q * (stdPx.size() - 1))]; };
+            std::ostringstream ss;
+            ss << "covStdPx (" << (matchedPoints.newMatches ? "python" : "LK")
+               << ", n=" << stdPx.size() << "): p10=" << at(0.1)
+               << " median=" << at(0.5) << " p90=" << at(0.9);
+            logger.log("ImageMatcher", ss.str());
+        }
+    }
+
     double totalError_ = 0.0d;
+    const auto tBuilt = std::chrono::steady_clock::now();
 
     estimator.estimate(matches, R, t_dir, t_init, totalError_);
+    const auto tEstimated = std::chrono::steady_clock::now();
+    lastNoisePx_ = static_cast<float>(estimator.lastNoisePx());
+
+    // Sign memory: the cheirality vote decides the sign of t from scratch every frame,
+    // and with distant points it can sit near 50/50, flipping t frame to frame (the
+    // drone then dithers). Only let the sign change against the previous direction
+    // when the vote is decisive; otherwise keep the previous sign.
+    constexpr double kDecisiveVote = 0.7;
+    if (t_dir.norm() > 1e-8) {
+        const double margin = estimator.lastVoteMargin();
+        if (lastValidT_.norm() > 1e-8 && t_dir.dot(lastValidT_) < 0 && margin < kDecisiveVote) {
+            t_dir = -t_dir;
+            std::ostringstream ss;
+            ss << "t sign kept from previous frame (cheirality vote " << margin << ")";
+            logger.log("ImageMatcher", ss.str());
+        }
+        lastValidT_ = t_dir;
+    }
     t_init = t_dir;
     cv::Mat R_cv;
     cv::Point3f t_cv;
     R_cv = matrix3dToMat(R);
     t_cv = cv::Point3f(t_dir.x(), t_dir.y(), t_dir.z());
 
-    cv::Mat t_mat = cv::Mat(t_cv);
-    float totalError;
-    totalError = ImageMatcher::getSampsonPixelError(inputMatches,targetMatches, R_cv, t_mat);
-    if (totalError < 1) totalError *= 100;
+    // Position-error magnitude: median de-rotated parallax in pixels, i.e. the angle
+    // between each current bearing and the rotation-compensated target bearing
+    // (R * bearing2), times fx. Unlike the Sampson error (a fit residual that sits at
+    // the noise floor for any baseline), it grows with baseline/depth and drops to the
+    // matching-noise floor (~1-2 px) at the target. Same measure as parallax_px in
+    // pnecOptimizer.hpp's solveTranslation(). An inaccurate R inflates it.
+    std::vector<double> parallax;
+    parallax.reserve(matches.size());
+    for (const auto& m : matches) {
+        const Eigen::Vector3d Rb2 = R * m.bearing2;
+        parallax.push_back(std::atan2(m.bearing1.cross(Rb2).norm(), m.bearing1.dot(Rb2)));
+    }
+    auto mid = parallax.begin() + parallax.size() / 2;
+    std::nth_element(parallax.begin(), mid, parallax.end());
+    const float totalError = static_cast<float>(*mid * K(0, 0));
 
+    // Sampson error kept as a fit-quality diagnostic only (NaN when t_dir is zero).
+    cv::Mat t_mat = cv::Mat(t_cv);
+    const float sampsonPx = ImageMatcher::getSampsonPixelError(inputMatches, targetMatches, R_cv, t_mat);
+    {
+        std::ostringstream ss;
+        ss << "parallaxPx: " << totalError << " sampsonPx: " << sampsonPx;
+        logger.log("ImageMatcher", ss.str());
+    }
+
+    // Image-based translation error (options 1 and 2), logged every frame so the
+    // sources can be compared offline; main.cpp picks which one drives the gate.
+    flowFit_ = fitFlow(R);
+    eccFit_ = eccEnabled_ ? fitEcc(R, frame) : TranslationFit{};
+    {
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        ss.precision(3);
+        const cv::Point3f fe = flowFit_.errorPx(), ee = eccFit_.errorPx();
+        ss << "translationFit match_id=" << matchedPoints.matchId
+           << " flow valid=" << flowFit_.valid << " err=" << fe.x << "," << fe.y << "," << fe.z
+           << " sigma=" << flowFit_.sigmaPx << " z=" << flowFit_.z << " inliers=" << flowFit_.quality
+           << " n=" << flowFit_.n << " ms=" << flowFit_.ms
+           << " | ecc valid=" << eccFit_.valid << " err=" << ee.x << "," << ee.y << "," << ee.z
+           << " cc=" << eccFit_.quality << " ms=" << eccFit_.ms;
+        logger.log("ImageMatcher", ss.str());
+    }
+
+    {
+        using ms = std::chrono::duration<double, std::milli>;
+        const auto tEnd = std::chrono::steady_clock::now();
+        const auto& pt = estimator.lastTimings();
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        ss.precision(1);
+        ss << "timing build_ms=" << ms(tBuilt - tAlignStart).count()
+           << " pnec_ms=" << ms(tEstimated - tBuilt).count()
+           << " (init=" << pt.initMs << " nec=" << pt.necMs << " weighted=" << pt.weightedMs
+           << " joint=" << pt.jointMs << " guards=" << pt.guardsMs << ")"
+           << " post_ms=" << ms(tEnd - tEstimated).count()
+           << " total_ms=" << ms(tEnd - tAlignStart).count();
+        logger.log("ImageMatcher", ss.str());
+    }
     return {R_cv, t_cv, totalError, true};
 }
 
@@ -1420,4 +1522,126 @@ float ImageMatcher::getSymmetricEpipolarDistance(const std::vector<cv::Point2f>&
 
     // Returns average distance in pixels (e.g. 0.75 px)
     return static_cast<float>(total_distance / valid_count);
+}
+
+// Option 1: robust least-squares fit of the de-rotated match displacements
+// d_i = p_cur_i - pi(K R K^-1 p_tgt_i) with d_i = tau + s * (p_cur_i - c).
+// The expansion is solved as s' = s * r (px at radius r) for conditioning. Huber IRLS
+// keeps bad matches from pulling the fit; the covariance gives sigma and z.
+TranslationFit ImageMatcher::fitFlow(const Eigen::Matrix3d& Rm) const {
+    TranslationFit f;
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t N = std::min(inputMatches.size(), targetMatches.size());
+    if (N < 8) return f;
+    const Eigen::Matrix3d H = K * Rm * K.inverse();
+    const Eigen::Vector2d c(K(0, 2), K(1, 2));
+    // Fixed reference radius, shared with the ECC fit so both report s*r in the same px.
+    const double r = 0.5 * c.norm();
+    std::vector<Eigen::Vector2d> q, d;
+    q.reserve(N);
+    d.reserve(N);
+    for (size_t i = 0; i < N; ++i) {
+        const Eigen::Vector3d p = H * Eigen::Vector3d(targetMatches[i].x, targetMatches[i].y, 1.0);
+        if (p.z() <= 1e-9) continue;
+        const Eigen::Vector2d cur(inputMatches[i].x, inputMatches[i].y);
+        d.push_back(cur - p.head<2>() / p.z());
+        q.push_back((cur - c) / r);
+    }
+    const size_t M = d.size();
+    if (M < 8) return f;
+
+    constexpr double kHuber = 1.5;   // in units of the robust residual sigma
+    Eigen::Vector3d x = Eigen::Vector3d::Zero();   // tau_x, tau_y, s' (px)
+    std::vector<double> w(M, 1.0), res(M);
+    double sigma = 1.0;
+    Eigen::Matrix3d AtA;
+    for (int it = 0; it < 6; ++it) {
+        AtA.setZero();
+        Eigen::Vector3d Atb = Eigen::Vector3d::Zero();
+        for (size_t i = 0; i < M; ++i) {
+            const Eigen::Vector3d ax(1, 0, q[i].x()), ay(0, 1, q[i].y());
+            AtA += w[i] * (ax * ax.transpose() + ay * ay.transpose());
+            Atb += w[i] * (ax * d[i].x() + ay * d[i].y());
+        }
+        x = AtA.ldlt().solve(Atb);
+        for (size_t i = 0; i < M; ++i)
+            res[i] = (d[i] - x.head<2>() - x.z() * q[i]).norm();
+        std::vector<double> sorted = res;
+        std::nth_element(sorted.begin(), sorted.begin() + M / 2, sorted.end());
+        // Median of a 2D residual length is 1.1774 * per-axis sigma (Rayleigh).
+        sigma = std::max(sorted[M / 2] / 1.1774, 1e-3);
+        for (size_t i = 0; i < M; ++i)
+            w[i] = res[i] <= kHuber * sigma ? 1.0 : kHuber * sigma / res[i];
+    }
+    if (!x.allFinite()) return f;
+    // Error vector e = (tau_x, tau_y, -s') and its covariance sigma^2 (A^T W A)^-1.
+    Eigen::Matrix3d C = sigma * sigma * AtA.inverse();
+    Eigen::Vector3d e(x.x(), x.y(), -x.z());
+    Eigen::Matrix3d J = Eigen::Vector3d(1, 1, -1).asDiagonal();
+    C = J * C * J.transpose();
+    f.valid = C.allFinite();
+    f.tauX = static_cast<float>(x.x());
+    f.tauY = static_cast<float>(x.y());
+    f.rPx = static_cast<float>(r);
+    f.s = static_cast<float>(x.z() / r);
+    f.sigmaPx = static_cast<float>(std::sqrt(C.trace()));
+    f.z = static_cast<float>(std::sqrt(std::max(0.0, e.dot(C.ldlt().solve(e)))));
+    f.quality = std::count_if(w.begin(), w.end(), [](double v) { return v >= 1.0; }) / double(M);
+    f.n = static_cast<int>(M);
+    f.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return f;
+}
+
+// Option 2: dense ECC (affine) between the target warped by the estimated rotation
+// (K R K^-1, so only translation effects remain) and the current frame, at 1/3
+// resolution. ECC's warp W maps template (de-rotated target) pixels to frame pixels,
+// so W(x) - x is the same displacement field as in fitFlow; its value at the principal
+// point is tau and half the trace of (A - I) is s. Only valid near the target, where
+// the images already overlap closely (ECC starts from the identity).
+TranslationFit ImageMatcher::fitEcc(const Eigen::Matrix3d& Rm, const cv::Mat& frame) {
+    TranslationFit f;
+    if (frame.empty() || targetImageGray.empty()) return f;
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr double kEccScale = 1.0 / 3.0;
+    if (targetSmall_.empty())
+        cv::resize(targetImageGray, targetSmall_, cv::Size(), kEccScale, kEccScale, cv::INTER_AREA);
+    cv::Mat gray, cur;
+    if (frame.channels() == 3) cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    else gray = frame;
+    cv::resize(gray, cur, targetSmall_.size(), 0, 0, cv::INTER_AREA);
+
+    // K is in full-resolution (target image) pixels.
+    const double sc = static_cast<double>(targetSmall_.cols) / targetImageGray.cols;
+    Eigen::Matrix3d S = Eigen::Matrix3d::Identity();
+    S(0, 0) = S(1, 1) = sc;
+    const Eigen::Matrix3d Hs = S * K * Rm * K.inverse() * S.inverse();
+    cv::Mat Hcv(3, 3, CV_64F);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) Hcv.at<double>(i, j) = Hs(i, j);
+    cv::Mat tmpl, mask;
+    cv::warpPerspective(targetSmall_, tmpl, Hcv, cur.size(), cv::INTER_LINEAR);
+    cv::warpPerspective(cv::Mat(targetSmall_.size(), CV_8U, cv::Scalar(255)), mask, Hcv,
+                        cur.size(), cv::INTER_NEAREST);
+    cv::erode(mask, mask, cv::Mat(), cv::Point(-1, -1), 3);   // drop interpolated borders
+
+    cv::Mat W = cv::Mat::eye(2, 3, CV_32F);
+    double cc = 0;
+    try {
+        cc = cv::findTransformECCWithMask(tmpl, cur, mask, cv::noArray(), W, cv::MOTION_AFFINE,
+                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 50, 1e-5), 5);
+    } catch (const cv::Exception&) {
+        return f;   // did not converge
+    }
+    const double a00 = W.at<float>(0, 0) - 1, a01 = W.at<float>(0, 1), b0 = W.at<float>(0, 2);
+    const double a10 = W.at<float>(1, 0), a11 = W.at<float>(1, 1) - 1, b1 = W.at<float>(1, 2);
+    const double cxs = K(0, 2) * sc, cys = K(1, 2) * sc;
+    const double r = 0.5 * std::hypot(K(0, 2), K(1, 2));
+    f.tauX = static_cast<float>((a00 * cxs + a01 * cys + b0) / sc);
+    f.tauY = static_cast<float>((a10 * cxs + a11 * cys + b1) / sc);
+    f.s = static_cast<float>(0.5 * (a00 + a11));
+    f.rPx = static_cast<float>(r);
+    f.quality = cc;
+    f.valid = std::isfinite(f.tauX) && std::isfinite(f.tauY) && std::isfinite(f.s);
+    f.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return f;
 }

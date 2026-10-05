@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cstdint>
+#include <chrono>
 #include <cstring>
 #include <array>
 #include <vector>
@@ -29,10 +30,17 @@
 //   [3..6]   uint32  frame_id     (incremented by Python on every new match set)
 //   [7..10]  int32   n            (number of matches in this payload, may be 0)
 //   [...]    n * (kpts0, kpts1, scores, covariances) — see parse() below.
+//   [TIMING_OFFSET] timing block (24 bytes, fixed offset after the largest payload):
+//            uint32 cam_frame_id  (RtspReader frame_id of the image that was matched)
+//            uint32 reserved
+//            float64 t_frame      (wall clock when Python took that frame)
+//            float64 t_done       (wall clock when Python finished writing this set)
 class SPSGReader {
 public:
     static constexpr int    MAX_KP   = 512;
-    static constexpr size_t SHM_SIZE = 1 + 1 + 1 + 4 + 4 + MAX_KP * (2+2+1+3) * 4;
+    static constexpr size_t TIMING_OFFSET = 1 + 1 + 1 + 4 + 4 + MAX_KP * (2+2+1+3) * 4;
+    static constexpr size_t TIMING_SIZE = 4 + 4 + 8 + 8;
+    static constexpr size_t SHM_SIZE = TIMING_OFFSET + TIMING_SIZE;
 
     // Opens the shared-memory segment `name`, retrying for up to ~5 minutes (600 *
     // 500ms) since Python may not have created it yet at process startup. Throws
@@ -119,8 +127,14 @@ public:
         memcpy(snap.data(), (const uint8_t*)data, SHM_SIZE);
 
         data[2] = 0;
+        const int skipped = (last_frame_id_ != 0 && current_id > last_frame_id_)
+                                ? static_cast<int>(current_id - last_frame_id_ - 1) : 0;
         last_frame_id_ = current_id;
-        return parse(snap.data(), logger);
+        Matches m = parse(snap.data(), logger);
+        m.skipped = skipped;
+        m.recvTs = std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return m;
     }
 
     // Signals Python to stop (is_alive = 0) and unmaps/closes the shared-memory segment.
@@ -153,6 +167,13 @@ private:
     // above) into a Matches struct.
     static Matches parse(const uint8_t* p, Logger& logger) {
         Matches m;
+        {
+            const uint8_t* t = p + TIMING_OFFSET;
+            memcpy(&m.camFrameId, t, 4);
+            memcpy(&m.pyFrameTs, t + 8, 8);
+            memcpy(&m.pyDoneTs, t + 16, 8);
+            memcpy(&m.matchId, p + 3, 4);
+        }
         p += 3 + 4;                                      // skip flag
         memcpy(&m.n, p, 4);  p += 4;
 

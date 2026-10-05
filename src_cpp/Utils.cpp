@@ -1,4 +1,8 @@
 #include "Utils.h"
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/wait.h>
 
 bool hasNaN(const cv::Point3f& p) {
     return std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z);
@@ -11,14 +15,74 @@ void launch_python(const std::string& target) {
     std::system(cmd.c_str());
 }
 
-void launch_python_posix(const std::string& onnx_matches, const std::string& target) {
+PythonProcess launch_python_posix(const std::string& onnx_matches, const std::string& target,
+                                  Logger& logger) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        logger.log("main", "error: pipe() failed, starting Python without output logging");
+        fds[0] = fds[1] = -1;
+    }
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process
-        execlp("python3", "python3", onnx_matches.c_str() , "--target", target.c_str(), nullptr);
-        _exit(1); // Exits child if exec fails
+        // Child: stdout + stderr into the pipe, unbuffered so lines arrive as printed.
+        if (fds[1] != -1) {
+            dup2(fds[1], STDOUT_FILENO);
+            dup2(fds[1], STDERR_FILENO);
+            close(fds[0]);
+            close(fds[1]);
+        }
+        setenv("PYTHONUNBUFFERED", "1", 1);
+        execlp("python3", "python3", "-u", onnx_matches.c_str(), "--target", target.c_str(), nullptr);
+        _exit(127); // exec failed
     }
-    // Parent C++ code continues immediately
+    if (pid < 0) {
+        logger.log("main", "error: fork() failed, Python matcher not started");
+        if (fds[0] != -1) { close(fds[0]); close(fds[1]); }
+        return PythonProcess();
+    }
+    // Parent continues immediately; a thread forwards Python's output line by line.
+    std::thread reader;
+    if (fds[0] != -1) {
+        close(fds[1]);
+        reader = std::thread([fd = fds[0], &logger]() {
+            FILE* f = fdopen(fd, "r");
+            if (!f) { close(fd); return; }
+            char* line = nullptr;
+            size_t cap = 0;
+            ssize_t n;
+            while ((n = getline(&line, &cap, f)) != -1) {
+                std::string s(line, static_cast<size_t>(n));
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                if (!s.empty()) logger.log("python", s);
+            }
+            free(line);
+            fclose(f);   // EOF: Python exited (or closed its output)
+        });
+    }
+    return PythonProcess(pid, std::move(reader), &logger);
+}
+
+void PythonProcess::stop(double timeoutSec) {
+    if (pid_ > 0) {
+        int status = 0;
+        pid_t r = 0;
+        const int steps = static_cast<int>(timeoutSec * 20);
+        for (int i = 0; i < steps && (r = waitpid(pid_, &status, WNOHANG)) == 0; ++i)
+            usleep(50 * 1000);
+        if (r == 0) {
+            if (logger_) logger_->log("main", "Python did not exit in time, sending SIGTERM");
+            kill(pid_, SIGTERM);
+            r = waitpid(pid_, &status, 0);
+        }
+        if (logger_ && r == pid_) {
+            std::ostringstream ss;
+            if (WIFEXITED(status)) ss << "Python exited with code " << WEXITSTATUS(status);
+            else if (WIFSIGNALED(status)) ss << "Python killed by signal " << WTERMSIG(status);
+            logger_->log("main", ss.str());
+        }
+        pid_ = -1;
+    }
+    if (reader_.joinable()) reader_.join();
 }
 
 cv::Mat vector3dToMat(const Eigen::Vector3d& v) {

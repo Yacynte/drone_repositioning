@@ -1,8 +1,10 @@
 #pragma once
 #include <opencv2/opencv.hpp>
+#include <limits>
 #include <opencv2/features2d.hpp>
 #include "Utils.h"
 #include "pnecOptimizer.hpp"
+#include "pnecEstimator.hpp"
 #include "Logger.h"
 
 // Optical-flow tracking state carried between consecutive frames.
@@ -24,6 +26,28 @@ struct TrackingResult {
         std::vector<uint8_t> status;      // 1 if tracked successfully, 0 otherwise
         std::vector<float> err;           // Tracking error metric
     };
+
+// Translation error measured directly in the image, after removing the estimated
+// rotation: the de-rotated displacement field d_i = p_cur_i - pi(K R K^-1 p_tgt_i) is
+// fit with d_i = tau + s * (p_cur_i - c), c = principal point. tau is the sideways
+// image shift, s the expansion (s < 0: scene smaller than in the target = target is
+// ahead). Signed averages, so matching noise cancels (~noise/sqrt(N)) and the values
+// go to zero at the target, unlike the median parallax, whose length stays at the
+// ~1 px noise floor (~1 m from the target in logData4_11).
+struct TranslationFit {
+    bool valid = false;
+    float tauX = 0, tauY = 0;   // px (full resolution)
+    float s = 0;                // dimensionless expansion
+    float rPx = 0;              // median |p_cur - c|, converts s to px
+    float sigmaPx = 0;          // 1-sigma uncertainty of |error| (flow fit only)
+    float z = 0;                // |error| / sigma, ~chi with 3 dof (flow fit only)
+    double quality = 0;         // flow fit: inlier fraction; ECC: correlation coefficient
+    int n = 0;                  // matches used (flow fit)
+    float ms = 0;               // compute time
+    // Translation error in OpenCV camera axes (x right, y down, z forward), in px:
+    // the direction to move and how far, the same axes as PNEC's t.
+    cv::Point3f errorPx() const { return {tauX, tauY, -s * rPx}; }
+};
 
 // Estimates the camera's pose (rotation + translation direction) relative to a
 // fixed target image by matching SIFT features between the target and each new
@@ -54,6 +78,15 @@ public:
     // frame, estimates {rotationMatrix, translationDirection, meanError, success} via
     // the PNEC (probabilistic normal epipolar constraint) optimizer.
     std::tuple<cv::Mat, cv::Point3f, float, bool> getAlignment( const Matches& matchedPoints, const cv::Mat& frame = cv::Mat() );
+    // Matching-noise level of the last getAlignment() call in pixels (fx*sqrt(lambda0)
+    // of the NEC normals); main.cpp sets the translation arrival threshold from it.
+    float lastNoisePx() const { return lastNoisePx_; }
+    // Option 1: signed least-squares fit of the de-rotated match displacements.
+    const TranslationFit& lastFlowFit() const { return flowFit_; }
+    // Option 2: dense ECC (affine) between the de-rotated target image and the frame.
+    // Only computed when enabled (a few ms per frame).
+    const TranslationFit& lastEccFit() const { return eccFit_; }
+    void setEccEnabled(bool on) { eccEnabled_ = on; }
 
 private:
     Logger& logger;
@@ -65,6 +98,13 @@ private:
     Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
     Eigen::Vector3d t_dir = Eigen::Vector3d::Zero();
     Eigen::Vector3d t_init = Eigen::Vector3d::Zero();
+    Eigen::Vector3d lastValidT_ = Eigen::Vector3d::Zero();   // last non-zero t_dir (sign memory)
+    float lastNoisePx_ = std::numeric_limits<float>::quiet_NaN();
+    TranslationFit flowFit_, eccFit_;
+    bool eccEnabled_ = false;
+    cv::Mat targetSmall_;   // target gray at kEccScale, cached on first use
+    TranslationFit fitFlow(const Eigen::Matrix3d& R) const;
+    TranslationFit fitEcc(const Eigen::Matrix3d& R, const cv::Mat& frame);
     bool need_sift_refresh;
     std::vector<cv::KeyPoint> targetKeypoints;
     cv::Mat targetDescriptors;

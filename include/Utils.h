@@ -1,4 +1,5 @@
 #pragma once
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/calib3d.hpp>
 #include <cmath>
@@ -10,6 +11,8 @@
 #include <Eigen/Geometry>
 #include <unistd.h>
 #include <sys/types.h>
+#include <thread>
+#include "Logger.h"
 
 // Grab-bag of small helpers shared across the C++ app: NaN checks, coordinate-frame
 // conversions, rotation-matrix <-> Euler-angle extraction, CLI flag parsing, and
@@ -22,10 +25,31 @@ bool hasNaN(const cv::Point3f& p);
 // by launch_python_posix() (used by main.cpp); kept for reference.
 void launch_python( const std::string& target);
 
-// Forks and execs "python3 <onnx_matches> --target <target>" without blocking the
-// caller. This is how main.cpp starts the external SuperPoint/LightGlue matcher
-// process (src_py/matches_onnx.py).
-void launch_python_posix(const std::string& onnx_matches, const std::string& target);
+// The external SuperPoint/LightGlue matcher process (src_py/matches_onnx.py) started
+// by launch_python_posix(): its pid and a thread that copies every line Python writes
+// to stdout/stderr into the app log as "[python] <line>". stop() (also run by the
+// destructor) waits for Python to exit, sends SIGTERM after timeoutSec, and joins the
+// thread, so the logger is never used after main() returns. Declare it after the
+// Logger it writes to.
+class PythonProcess {
+public:
+    PythonProcess() = default;
+    PythonProcess(pid_t pid, std::thread reader, Logger* logger)
+        : pid_(pid), reader_(std::move(reader)), logger_(logger) {}
+    PythonProcess(PythonProcess&&) = default;
+    PythonProcess& operator=(PythonProcess&&) = default;
+    ~PythonProcess() { stop(); }
+    void stop(double timeoutSec = 3.0);
+private:
+    pid_t pid_ = -1;
+    std::thread reader_;
+    Logger* logger_ = nullptr;
+};
+
+// Forks and execs "python3 -u <onnx_matches> --target <target>" without blocking the
+// caller, with Python's stdout and stderr piped into logger (see PythonProcess).
+PythonProcess launch_python_posix(const std::string& onnx_matches, const std::string& target,
+                                  Logger& logger);
 
 // Squashes each component of x through the given activation ("sigmoid", "tanh", or
 // "gaussian"; unrecognized names pass x through unchanged) with gain k, used to turn
@@ -50,6 +74,13 @@ struct Matches {
     std::vector<float> scores;             // per-match confidence
     std::vector<cv::Point3f> covariances;  // per-match 2D covariance (packed xx, xy, yy)
     bool newMatches = false;               // false if this frame's matches were already consumed
+    // Timing (wall clock, seconds since epoch; NaN if unknown), see Matches.hpp layout:
+    uint32_t matchId = 0;      // Python's match-set counter
+    uint32_t camFrameId = 0;   // RtspReader frame_id of the image Python matched
+    double pyFrameTs = std::numeric_limits<double>::quiet_NaN();  // Python got that frame
+    double pyDoneTs  = std::numeric_limits<double>::quiet_NaN();  // Python finished writing
+    double recvTs    = std::numeric_limits<double>::quiet_NaN();  // C++ read the match set
+    int skipped = 0;           // match sets Python wrote that C++ never read (overwritten)
 };
 
 // Remaps an OpenCV-convention point (x right, y down, z forward) into Unreal Engine's

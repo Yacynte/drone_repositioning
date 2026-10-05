@@ -470,15 +470,16 @@ int main()
 }
 */
 
-// Converts rate/error into a "roll,pitch,yaw,vx,vy,vz,0" command string: zeroes out
-// each axis once its error falls under the minRot/minTrans deadband (so the drone
-// doesn't jitter around the target), sends it via SendMetadata(), and returns true
-// once every axis is zeroed (i.e. within tolerance on both rotation and translation).
+// Converts rate/command into a "roll,pitch,yaw,vx,vy,vz,0" command string: zeroes
+// each rotation axis once its error falls under the minRot deadband, zeroes the
+// velocity once main.cpp reports translation_aligned (its filtered, noise-relative
+// arrival test replaced the old per-axis minTrans deadband on parallaxPx * t, which
+// also counted "no translation signal" frames as arrived), sends it via
+// SendMetadata(), and returns true once rotation and translation are both aligned.
 // Note: `simulation` is accepted (main.cpp passes unrealTest here) but currently
 // unused — the deadband/command logic is the same for both simulation and hardware.
-bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, cv::Point3f trans_error, std::string& data_to_send, bool simulation) {
-    static float minRot = 1.0f;
-    static float minTrans = 1.0f;
+bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error, bool translation_aligned, std::string& data_to_send, bool simulation) {
+    static float minRot = 0.1f;
     float roll = 0;
     float pitch = rotation_rate.y;
     float yaw = rotation_rate.z;
@@ -489,9 +490,7 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
     float y = translation_rate.y;
     float z = translation_rate.z;
 
-    if (std::abs(trans_error.x) < minTrans) x = 0;
-    if (std::abs(trans_error.y) < minTrans) y = 0;
-    if (std::abs(trans_error.z) < minTrans) z = 0;
+    if (translation_aligned) x = y = z = 0;
     
     std::stringstream ss;
     ss << roll << "," << pitch << "," << yaw << "," << x << "," << y << "," << z << "," << "0" << "\n";
@@ -500,6 +499,5 @@ bool MetadataTcpClient::respositionFunc(cv::Point3f rotation_rate, cv::Point3f t
         logger.log("MetadataClient", "Could not send data");
     }
     bool rot_err = pitch == 0 && yaw == 0;
-    bool trans_err_bool = x == 0 && y == 0 && z == 0;
-    return rot_err && trans_err_bool;
+    return rot_err && translation_aligned;
 }

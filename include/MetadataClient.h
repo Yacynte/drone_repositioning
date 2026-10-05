@@ -48,12 +48,14 @@ public:
     void stopReceiver();
     // Closes the given handler socket: -2 = both, 0 = server_socket, 1 = client_socket.
     void CloseConnectionhandler(int socket_to_close = -2);
-    // Converts the current rotation/translation error and rate into a 7-field CSV
-    // command ("roll,pitch,yaw,vx,vy,vz,state\n"), writes it to data_to_send, and sends
-    // it via SendMetadata(). Returns true once both rotation and translation errors are
-    // within tolerance (i.e. the drone has arrived at the target).
+    // Converts the current rotation error/rate and the translation command into a
+    // 7-field CSV command ("roll,pitch,yaw,vx,vy,vz,state\n"), writes it to
+    // data_to_send, and sends it via SendMetadata(). translation_aligned is main.cpp's
+    // translation arrival decision (filtered parallax below the noise-based threshold);
+    // when true the velocity is zeroed. Returns true once rotation is inside its
+    // deadband and translation_aligned is true (i.e. the drone has arrived).
     bool respositionFunc(cv::Point3f rotation_rate, cv::Point3f translation_rate, const cv::Point3f rot_error,
-                        cv::Point3f translation, std::string& data_to_send, bool simulation);
+                        bool translation_aligned, std::string& data_to_send, bool simulation);
 
     // flags (atomic = safe to write/read from different threads)
     std::atomic<bool> startRepositioning{false};

@@ -2,8 +2,10 @@
 
 #include <opencv2/core.hpp>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -16,6 +18,17 @@
 // log(); see writeHeader() for the exact column layout. Buffers lines in memory and
 // flushes to disk every flush_every_n rows (or via flush()/the destructor) to keep
 // disk I/O off the hot path.
+// Per-frame timing appended to each row (wall-clock seconds / ms; NaN if unknown).
+struct AlgoFrameTiming {
+    uint32_t matchId = 0;      // Python's match-set counter
+    uint32_t camFrameId = 0;   // RtspReader frame_id of the matched image
+    int skipped = 0;           // match sets overwritten before C++ read them
+    double pyFrameTs = std::numeric_limits<double>::quiet_NaN();  // Python took the frame
+    double pyDoneTs  = std::numeric_limits<double>::quiet_NaN();  // Python wrote the matches
+    double recvTs    = std::numeric_limits<double>::quiet_NaN();  // C++ read them
+    double alignMs   = std::numeric_limits<double>::quiet_NaN();  // getAlignment() wall time
+};
+
 class AlgoLogger {
 public:
     // Mirrors the 6 numeric fields of the "roll,pitch,yaw,vx,vy,vz,state" command
@@ -87,6 +100,11 @@ public:
         return c;
     }
 
+    // Per-frame timing appended to each row. Defined above the class as
+    // AlgoFrameTiming: nested, its default member initializers could not be used in a
+    // default argument inside the class.
+    using FrameTiming = AlgoFrameTiming;
+
     // Appends one CSV row for the current frame:
     // - send_ts: wall-clock time the command was computed/sent (seconds)
     // - px_error: alignment/reprojection error (see writeHeader() for the column name)
@@ -98,7 +116,8 @@ public:
              float px_error,
              const cv::Point3f& rvec,
              const cv::Point3f& unit_vec,
-             const std::optional<Command6>& cmd_parsed = std::nullopt)
+             const std::optional<Command6>& cmd_parsed = std::nullopt,
+             const FrameTiming& ft = FrameTiming())
     {
         std::ostringstream line;
         line.setf(std::ios::fixed);
@@ -114,7 +133,14 @@ public:
              << std::setprecision(3)
              << cmd_parsed->c0 << "," << cmd_parsed->c1 << "," << cmd_parsed->c2 << ","
              << std::setprecision(3)
-             << cmd_parsed->c3 << "," << cmd_parsed->c4 << "," << cmd_parsed->c5 << "\n";
+             << cmd_parsed->c3 << "," << cmd_parsed->c4 << "," << cmd_parsed->c5 << ","
+             << ft.matchId << "," << ft.camFrameId << "," << ft.skipped << ","
+             << std::setprecision(6) << ft.pyFrameTs << "," << ft.pyDoneTs << "," << ft.recvTs << ","
+             << std::setprecision(1)
+             << (ft.pyDoneTs - ft.pyFrameTs) * 1000.0 << ","   // py_ms: Python processing
+             << (ft.recvTs - ft.pyDoneTs) * 1000.0 << ","      // handoff_ms: written -> read by C++
+             << ft.alignMs << ","                               // align_ms: getAlignment()
+             << (send_ts - ft.pyFrameTs) * 1000.0 << "\n";     // age_ms: frame taken -> command sent
         } else {
             line << ",,,,,, \n";
         }
@@ -143,10 +169,14 @@ private:
 
     // Writes the CSV column header row (called once, on first open of a new file).
     void writeHeader() {
-        out_ << "send_ts,repo_error,px_error_x, px_error_y,"
-                "unit_vec_x, unit_vec_y, unit_vec_z,"
-                "rot_error_x, rot_error_y, rot_error_z,"
-                "w_x,w_y,w_z,v_x,v_y,v_z\n";
+        // One name per value written by log() (the previous header had two extra
+        // px_error columns, shifting every name after send_ts).
+        out_ << "send_ts,px_error,"
+                "unit_vec_x,unit_vec_y,unit_vec_z,"
+                "rot_error_x,rot_error_y,rot_error_z,"
+                "w_x,w_y,w_z,v_x,v_y,v_z,"
+                "match_id,cam_frame,skipped,py_frame_ts,py_done_ts,cpp_recv_ts,"
+                "py_ms,handoff_ms,align_ms,age_ms\n";
     }
 
     // Appends s to the in-memory buffer and flushes to disk once flush_every_n lines

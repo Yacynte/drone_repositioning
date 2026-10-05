@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <memory>
@@ -110,8 +111,11 @@ public:
      * We use eigendecomposition to generate sigma points.
      */
     explicit UnscentedTransform(Logger& logger): logger(logger){}
+    // keypoint: pixel position (u, v) the covariance belongs to; the sigma points are
+    // spread around it (the unprojection is position-dependent).
     Matrix3d propagate2DTo3D(const Matrix2d& cov_2d,
-                                    const Matrix3d& K) {
+                                    const Matrix3d& K,
+                                    const Vector2d& keypoint) {
         // Unscented transform parameters
         const int n = 2;  // 2D space
         const double lambda = 3.0 - n;  // kappa = 3 - n
@@ -123,12 +127,12 @@ public:
         
         // Generate sigma points (2n + 1 = 5 points)
         std::vector<Vector2d> sigma_points;
-        sigma_points.push_back(Vector2d::Zero());  // Mean point
+        sigma_points.push_back(keypoint);  // Mean point
         
         for (int i = 0; i < n; ++i) {
             double std = std::sqrt(std::max(evals(i), 0.0) * (n + lambda));
-            sigma_points.push_back(evecs.col(i) * std);
-            sigma_points.push_back(evecs.col(i) * (-std));
+            sigma_points.push_back(keypoint + evecs.col(i) * std);
+            sigma_points.push_back(keypoint - evecs.col(i) * std);
         }
         
         // Transform sigma points through unprojection
@@ -304,19 +308,48 @@ private:
         double lambda1 = eigenvalues(1);  // should be >> 0 for good translation
         double lambda2 = eigenvalues(2);  // largest eigenvalue
 
-        // 1. Must have minimum total parallax energy
-        if (lambda2 < 1e-3) {
+        // 1. Parallax energy must stand clearly above the matching-noise floor.
+        // lambda0 estimates per-match noise energy, so the test is relative: the old
+        // absolute lambda2 < 1e-3 (~1.8 deg RMS parallax) zeroed every frame of
+        // small-baseline runs even at lambda2/lambda0 ~ 20-50 (LogData 2026-09-25).
+        // The absolute floor only catches genuinely zero-baseline input.
+        const double parallax_snr = lambda2 / std::max(lambda0, 1e-12);
+        if (lambda2 < 1e-7 || parallax_snr < 10.0) {
+            {
+                std::ostringstream ss;
+                ss << "error: Insufficient parallax (lambda2=" << lambda2
+                   << ", snr=" << parallax_snr << ")";
+                logger.log("pnec", ss.str());
+            }
             t = Vector3d::Zero(); // Pure rotation / zero baseline
             return;
         }
+
+        // De-rotated parallax in pixels: median angle between bearing1 and R*bearing2,
+        // times fx. ~matching noise (1-2 px) when the views coincide after rotation.
+        // The degeneracy checks (2, 3) only zero t when this is also small; with a
+        // real offset left, a noisy direction is kept rather than freezing at t = 0.
+        // Caveat: an inaccurate R inflates this value.
+        const double kAlignedParallaxPx = 3.0;
+        std::vector<double> parallax;
+        parallax.reserve(matches.size());
+        for (const auto& m : matches) {
+            const Vector3d Rb2 = R * m.bearing2;
+            parallax.push_back(std::atan2(m.bearing1.cross(Rb2).norm(), m.bearing1.dot(Rb2)));
+        }
+        auto mid = parallax.begin() + parallax.size() / 2;
+        std::nth_element(parallax.begin(), mid, parallax.end());
+        const double parallax_px = *mid * K_(0, 0);
+        const bool aligned = parallax_px < kAlignedParallaxPx;
         // ── 2. Conditioning check (normalized by lambda2) ─────────────────
         // Good translation: lambda1 is a substantial fraction of lambda2
         // Forward motion / degenerate: lambda1 collapses relative to lambda2
         double conditioning = lambda1 / lambda2;  // always in [0, 1], stable
-        if (conditioning < 0.05) {
+        if (conditioning < 0.02 && aligned) {   // softened from 0.05
             {
                 std::ostringstream ss;
-                ss << "error: Degenerate translation (conditioning=" << conditioning << ")";
+                ss << "error: Degenerate translation (conditioning=" << conditioning
+                   << ", parallax_px=" << parallax_px << ")";
                 logger.log("pnec", ss.str());
             }
             t = Vector3d::Zero();
@@ -326,10 +359,11 @@ private:
         // ── 3. Nullspace uniqueness check ────────────────────────────────
         // lambda0 must be clearly smaller than lambda1 (clean 1D null space)
         double nullspace_ratio = lambda0 / (lambda1 + 1e-8);
-        if (nullspace_ratio > 0.2) {
+        if (nullspace_ratio > 0.35 && aligned) {   // softened from 0.2
             {
                 std::ostringstream ss;
-                ss << "error: Ambiguous null space (ratio=" << nullspace_ratio << ")";
+                ss << "error: Ambiguous null space (ratio=" << nullspace_ratio
+                   << ", parallax_px=" << parallax_px << ")";
                 logger.log("pnec", ss.str());
             }
             t = Vector3d::Zero();
@@ -425,8 +459,9 @@ public:
         const int max_outer_iters = 5;
         for (int outer_iter = 0; outer_iter < max_outer_iters; outer_iter++) {
             solveRotation(matches, R, t_dir);
-            solveTranslation(matches, R, t);
-            
+            // Log eigenvalues only on the last pass, so logs keep one line per frame.
+            solveTranslation(matches, R, t, outer_iter == max_outer_iters - 1);
+
             // ── FIX 2: Cheirality Check (Resolve t sign ambiguity) ──
             checkAndFlipCheirality(matches, R, t);
             
@@ -436,9 +471,9 @@ public:
         }
 
         // Calculate final error
-        totalError = 0.0;
+        // totalError = 0.0;
         for (const auto& m : matches) {
-            totalError += sampsonError(m.bearing1, m.bearing2, R, t_dir);
+            totalError += sampsonError(m.bearing1, m.bearing2, R, t);
         }
     }
 
@@ -494,41 +529,127 @@ private:
         }
     }
 
+    // Solves for the translation direction t as the eigenvector of the smallest
+    // eigenvalue of AtA = sum(n * n^T), n = bearing1 x (R * bearing2) — the classic
+    // 8-point-style null-space solve, with several degeneracy guards (near-pure-
+    // rotation / ambiguous null space) that zero out t rather than return garbage.
     void solveTranslation(const std::vector<MatchData>& matches,
                           const Matrix3d& R,
-                          Vector3d& t) {
+                          Vector3d& t,
+                          bool verbose = true) {
         Matrix3d AtA = Matrix3d::Zero();
         for (const auto& m : matches) {
             Vector3d n = m.bearing1.cross(R * m.bearing2);
             AtA += n * n.transpose();
         }
-        
-        if (!R.allFinite() || !AtA.allFinite()) {
+        // ── FIX 1: Normalize by N to make absolute thresholds scale-invariant ──
+        double N = static_cast<double>(matches.size());
+        AtA /= N;   // eigenvalues now per-match averages
+
+        // ── Guard: AtA must be valid ──────────────────────────────
+        if (!R.allFinite()) {
+            {
+                std::ostringstream ss;
+                ss << "error: R is not finite:\n" << R;
+                logger.log("pnec", ss.str());
+            }
             t = Vector3d::Zero();
             return;
         }
-        
+        if (!AtA.allFinite()) {
+            t = Vector3d::Zero();
+            logger.log("pnec", "error: AtA not finite");
+            return;
+        }
         Eigen::SelfAdjointEigenSolver<Matrix3d> solver(AtA);
 
         if (solver.info() != Eigen::Success) {
             t = Vector3d::Zero();
+            logger.log("pnec", "error: Eigensolver failed");
             return;
         }
 
         Vector3d eigenvalues = solver.eigenvalues();
-        double lambda0 = eigenvalues(0);  
-        double lambda1 = eigenvalues(1);  
-        double lambda2 = eigenvalues(2);  
+        if (verbose) {
+            std::ostringstream ss;
+            ss << "[pnec] eigenvalues: " << eigenvalues.transpose();
+            logger.log("pnec", ss.str());
+        }
 
-        double gap = lambda1 - lambda0;
-        double t_reliability = gap / (lambda2 + 1e-8);
+        // Eigenvalues sorted ascending: λ₀ ≤ λ₁ ≤ λ₂
+        double lambda0 = eigenvalues(0);  // should be near 0 (null space)
+        double lambda1 = eigenvalues(1);  // should be >> 0 for good translation
+        double lambda2 = eigenvalues(2);  // largest eigenvalue
 
-        if (t_reliability < 0.1 || (lambda1 < 1e-2 && lambda2 < 1e-2)) {
-            t = Vector3d::Zero(); 
+        // 1. Parallax energy must stand clearly above the matching-noise floor.
+        // lambda0 estimates per-match noise energy, so the test is relative: the old
+        // absolute lambda2 < 1e-3 (~1.8 deg RMS parallax) zeroed every frame of
+        // small-baseline runs even at lambda2/lambda0 ~ 20-50 (LogData 2026-09-25).
+        // The absolute floor only catches genuinely zero-baseline input.
+        const double parallax_snr = lambda2 / std::max(lambda0, 1e-12);
+        if (lambda2 < 1e-5 || parallax_snr < 10.0) {
+            {
+                std::ostringstream ss;
+                ss << "error: Insufficient parallax (lambda2=" << lambda2
+                   << ", snr=" << parallax_snr << ")";
+                logger.log("pnec", ss.str());
+            }
+            t = Vector3d::Zero(); // Pure rotation / zero baseline
+            return;
+        }
+
+        // De-rotated parallax in pixels: median angle between bearing1 and R*bearing2,
+        // times fx. ~matching noise (1-2 px) when the views coincide after rotation.
+        // The degeneracy checks (2, 3) only zero t when this is also small; with a
+        // real offset left, a noisy direction is kept rather than freezing at t = 0.
+        // Caveat: an inaccurate R inflates this value.
+        const double kAlignedParallaxPx = 10.0;
+        std::vector<double> parallax;
+        parallax.reserve(matches.size());
+        for (const auto& m : matches) {
+            const Vector3d Rb2 = R * m.bearing2;
+            parallax.push_back(std::atan2(m.bearing1.cross(Rb2).norm(), m.bearing1.dot(Rb2)));
+        }
+        auto mid = parallax.begin() + parallax.size() / 2;
+        std::nth_element(parallax.begin(), mid, parallax.end());
+        const double parallax_px = *mid * K_(0, 0);
+        const bool aligned = parallax_px < kAlignedParallaxPx;
+        // ── 2. Conditioning check (normalized by lambda2) ─────────────────
+        // Good translation: lambda1 is a substantial fraction of lambda2
+        // Forward motion / degenerate: lambda1 collapses relative to lambda2
+        double conditioning = lambda1 / lambda2;  // always in [0, 1], stable
+        if (conditioning < 0.02 && aligned) {   // softened from 0.05
+            {
+                std::ostringstream ss;
+                ss << "error: Degenerate translation (conditioning=" << conditioning
+                   << ", parallax_px=" << parallax_px << ")";
+                logger.log("pnec", ss.str());
+            }
+            t = Vector3d::Zero();
+            return;
+        }
+
+        // ── 3. Nullspace uniqueness check ────────────────────────────────
+        // lambda0 must be clearly smaller than lambda1 (clean 1D null space)
+        double nullspace_ratio = lambda0 / (lambda1 + 1e-8);
+        if (nullspace_ratio > 0.35 && aligned) {   // softened from 0.2
+            {
+                std::ostringstream ss;
+                ss << "error: Ambiguous null space (ratio=" << nullspace_ratio
+                   << ", parallax_px=" << parallax_px << ")";
+                logger.log("pnec", ss.str());
+            }
+            t = Vector3d::Zero();
             return;
         }
 
         t = solver.eigenvectors().col(0);
+        t = t.normalized();
+        {
+            std::ostringstream ss;
+            ss << "[pnec translation Optimizer] Translation: " << t;
+            logger.log("pnec", ss.str());
+        }
     }
 
     // ── FIX 2 Helper: Depth test for Cheirality ──

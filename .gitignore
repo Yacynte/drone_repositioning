@@ -16,3 +16,4 @@ weights/*
 !weights/lightglue_patched.onnx
 !weights/superpoint.onnx
 controls/
+logData*
