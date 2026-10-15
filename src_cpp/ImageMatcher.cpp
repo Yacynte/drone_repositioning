@@ -1083,7 +1083,7 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
 
     // pnec::RelativePoseEstimator estimator(logger, K);
     const auto tAlignStart = std::chrono::steady_clock::now();
-    pnec::PNECEstimator estimator(logger, K); 
+    pnec::PNECEstimator estimator(logger, K, pnecOptions_);
     flowFit_ = eccFit_ = TranslationFit{};   // stale fits must not survive an early return
 
     if(!matchedPoints.newMatches && !frame.empty()){
@@ -1113,7 +1113,7 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
 
                 // Python sends the structure tensor H (not its inverse); the single
                 // inversion here gives the 2D covariance Sigma_2D = H^-1.
-                covariances.push_back(H.inv(cv::DECOMP_SVD));
+                covariances.push_back(identityCov_ ? cv::Matx22f::eye() : cv::Matx22f(H.inv(cv::DECOMP_SVD)));
             }
         }
         else return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
@@ -1161,6 +1161,20 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
     estimator.estimate(matches, R, t_dir, t_init, totalError_);
     const auto tEstimated = std::chrono::steady_clock::now();
     lastNoisePx_ = static_cast<float>(estimator.lastNoisePx());
+
+    // No rotation estimate this frame (e.g. no essential matrix near the goal, where the
+    // baseline is short): report the frame as failed instead of reusing the previous R,
+    // which is stale once the gimbal has moved and would also corrupt the de-rotation
+    // of the translation error. main.cpp sends zero commands for a failed frame.
+    ++estimateCalls_;
+    if (!estimator.lastSucceeded()) {
+        ++estimateFailures_;
+        std::ostringstream ss;
+        ss << "estimator failed (" << estimator.lastFailure() << "), frame skipped; failures "
+           << estimateFailures_ << "/" << estimateCalls_;
+        logger.log("ImageMatcher", ss.str());
+        return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
+    }
 
     // Sign memory: the cheirality vote decides the sign of t from scratch every frame,
     // and with distant points it can sit near 50/50, flipping t frame to frame (the

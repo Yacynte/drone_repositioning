@@ -87,6 +87,10 @@ public:
     // Only computed when enabled (a few ms per frame).
     const TranslationFit& lastEccFit() const { return eccFit_; }
     void setEccEnabled(bool on) { eccEnabled_ = on; }
+    // Ablation switches: estimator options (rotation method) and identity 2D
+    // covariances (sigma = 1 px for every match) instead of the structure tensor.
+    void setPnecOptions(const pnec::PNECOptions& options) { pnecOptions_ = options; }
+    void setIdentityCovariance(bool on) { identityCov_ = on; }
 
 private:
     Logger& logger;
@@ -102,6 +106,9 @@ private:
     float lastNoisePx_ = std::numeric_limits<float>::quiet_NaN();
     TranslationFit flowFit_, eccFit_;
     bool eccEnabled_ = false;
+    pnec::PNECOptions pnecOptions_;
+    long estimateCalls_ = 0, estimateFailures_ = 0;   // rotation estimates attempted / failed
+    bool identityCov_ = false;
     cv::Mat targetSmall_;   // target gray at kEccScale, cached on first use
     TranslationFit fitFlow(const Eigen::Matrix3d& R) const;
     TranslationFit fitEcc(const Eigen::Matrix3d& R, const cv::Mat& frame);

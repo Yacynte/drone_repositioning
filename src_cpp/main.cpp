@@ -27,6 +27,7 @@
 #include <opencv2/opencv.hpp>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <chrono>
 #include <deque>
@@ -40,7 +41,7 @@
 namespace {
 constexpr float kRotationGain = 0.1f;
 constexpr float kTranslationGain = 0.15f;
-constexpr float kMaxVelocity = 30.0f;
+constexpr float kMaxVelocity = 50.0f;
 constexpr float kMaxRotationRate = 5.0f;
 
 // ── Translation gate: when to move, and when translation has arrived ─────────────
@@ -272,6 +273,96 @@ private:
     }
 };
 
+// ── Control law (--control), for the ablation study ───────────────────────────────
+//   tanh:   u = U * tanh(k e / 2)                     (default; equals 2/(1+e^-ke) - 1)
+//   linear: u = clip(Kp e, -U, U)                     same gain near zero, hard saturation
+//   pd:     u = clip(Kp (e + Td de/dt), -U, U)        Td = --pd-td
+//   pid:    u = clip(Kp (e + I/Ti + Td de/dt), -U, U) Ti = --pid-ti, I = integral of e
+// with Kp = U k / 2, so all laws share the small-signal gain and differ only in
+// saturation, damping and the integral. The derivative is taken on the error, low-pass
+// filtered with time constant kPdFilterSec, and reset while the axis is inactive.
+//
+// The integral exists to cancel a persistent disturbance such as wind drift: a
+// velocity-commanded vehicle is already an integrator, so P alone reaches zero error
+// for a fixed goal, but a constant drift d leaves it an offset d / Kp. Because of that
+// it is used on the translation axes only (wind does not push the gimbal angle), and:
+//   - integration only inside |e| < --pid-izone px (no wind-up on the long approach);
+//   - conditional integration: frozen while the command is saturated in the direction
+//     of the error (anti-windup), and its share of the command is capped at U;
+//   - a settled (inactive) axis is not reset: the integrator is frozen and its output
+//     Kp I / Ti is still commanded, so the drone keeps compensating the drift instead of
+//     drifting off until the axis resumes.
+enum class ControlLaw { Tanh, Linear, PD, PID };
+constexpr double kPdFilterSec = 0.1;
+
+struct LawParams {
+    ControlLaw law = ControlLaw::Tanh;
+    float td = 0.0f;       // derivative time, s (pd, pid)
+    float ti = 0.0f;       // integral time, s (pid); <= 0 disables the integral
+    float izone = 0.0f;    // integrate only while |e| is below this
+};
+
+struct AxisController {
+    float update(float e, float limit, float gain, const LawParams& p, double nowSec, bool active) {
+        const float kp = limit * gain * 0.5f;
+        const bool useI = p.law == ControlLaw::PID && p.ti > 0.0f;
+        if (!active) {
+            valid_ = false;
+            return useI ? std::clamp(static_cast<float>(kp * integral_ / p.ti), -limit, limit) : 0.0f;
+        }
+        if (p.law == ControlLaw::Tanh) return limit * std::tanh(0.5f * gain * e);
+
+        const double dt = valid_ && nowSec > prevT_ ? nowSec - prevT_ : 0.0;
+        float u = kp * e;
+        if (p.law == ControlLaw::PD || p.law == ControlLaw::PID) {
+            if (dt > 0.0) {
+                const double raw = (e - prevE_) / dt;
+                const double a = kPdFilterSec / (kPdFilterSec + dt);
+                dFilt_ = a * dFilt_ + (1.0 - a) * raw;
+            } else {
+                dFilt_ = 0.0;
+            }
+            u += static_cast<float>(kp * p.td * dFilt_);
+        }
+        if (useI) {
+            double next = integral_;
+            if (dt > 0.0 && std::abs(e) < p.izone) next += e * dt;
+            // Cap the integral's share of the command at the saturation limit.
+            const double cap = limit * p.ti / kp;
+            next = std::clamp(next, -cap, cap);
+            const float uNext = u + static_cast<float>(kp * next / p.ti);
+            const bool saturatedWithError = std::abs(uNext) > limit && (uNext > 0) == (e > 0);
+            if (!saturatedWithError) integral_ = next;
+            u += static_cast<float>(kp * integral_ / p.ti);
+        }
+        prevE_ = e;
+        prevT_ = nowSec;
+        valid_ = true;
+        return std::clamp(u, -limit, limit);
+    }
+
+private:
+    bool valid_ = false;
+    float prevE_ = 0.0f;
+    double prevT_ = 0.0;
+    double dFilt_ = 0.0;
+    double integral_ = 0.0;   // px * s
+};
+
+struct VectorController {
+    AxisController axis[3];
+    // Rotation errors are always active (the deadband is applied in respositionFunc);
+    // translation axes are inactive while their error is exactly zero (settled).
+    cv::Point3f update(const cv::Point3f& e, float limit, float gain, const LawParams& p,
+                       double nowSec, bool zeroIsInactive) {
+        const float v[3] = {e.x, e.y, e.z};
+        float u[3];
+        for (int i = 0; i < 3; ++i)
+            u[i] = axis[i].update(v[i], limit, gain, p, nowSec, !(zeroIsInactive && v[i] == 0.0f));
+        return {u[0], u[1], u[2]};
+    }
+};
+
 // Open either a local camera or remote stream depending on the selected mode.
 // mode == "live": opens the fixed V4L2 device below and blocks (up to t seconds)
 //   warming it up until WARMUP_GOOD_FRAMES consecutive good frames are read.
@@ -495,6 +586,41 @@ int main(int argc, char** argv) {
     const float settlePx = static_cast<float>(std::stod(getStr(flags, "--settle-px", "1.5")));
     const float axisSettlePx = static_cast<float>(std::stod(getStr(flags, "--axis-settle-px",
                                    std::to_string(settlePx / std::sqrt(3.0f)))));
+    // Ablation switches (all default to the full method):
+    //   --rot-estimator pnec|nec|e   rotation estimator (A.5)
+    //   --cov tensor|identity        2D keypoint covariance: structure tensor or sigma = 1 px
+    //   --lk 1|0                     Lucas-Kanade sub-pixel refinement in the matcher
+    //   --control tanh|linear|pd|pid control law; --pd-td derivative time in s (pd, pid),
+    //                                --pid-ti integral time in s, --pid-izone px (pid)
+    const std::string rotEstimator = getStr(flags, "--rot-estimator", "pnec");
+    const std::string covMode = getStr(flags, "--cov", "tensor");
+    const bool lkRefine = getInt(flags, "--lk", 1) != 0;
+    const std::string controlName = getStr(flags, "--control", "tanh");
+    const float pdTd = static_cast<float>(std::stod(getStr(flags, "--pd-td", "0.05")));
+    const float pidTi = static_cast<float>(std::stod(getStr(flags, "--pid-ti", "5.0")));
+    const float pidIzone = static_cast<float>(std::stod(getStr(flags, "--pid-izone", "5.0")));
+    if (rotEstimator != "pnec" && rotEstimator != "nec" && rotEstimator != "e") {
+        std::cerr << "--rot-estimator must be pnec, nec or e" << std::endl;
+        return 1;
+    }
+    if (covMode != "tensor" && covMode != "identity") {
+        std::cerr << "--cov must be tensor or identity" << std::endl;
+        return 1;
+    }
+    if (controlName != "tanh" && controlName != "linear" && controlName != "pd" && controlName != "pid") {
+        std::cerr << "--control must be tanh, linear, pd or pid" << std::endl;
+        return 1;
+    }
+    LawParams translationLaw;
+    translationLaw.law = controlName == "pid" ? ControlLaw::PID
+                       : controlName == "pd" ? ControlLaw::PD
+                       : controlName == "linear" ? ControlLaw::Linear : ControlLaw::Tanh;
+    translationLaw.td = pdTd;
+    translationLaw.ti = pidTi;
+    translationLaw.izone = pidIzone;
+    // The gimbal angle is not disturbed by wind: in pid mode rotation runs P + D only.
+    LawParams rotationLaw = translationLaw;
+    if (rotationLaw.law == ControlLaw::PID) rotationLaw.law = ControlLaw::PD;
     if (transSource != "parallax" && transSource != "flow" && transSource != "ecc") {
         std::cerr << "--trans-source must be parallax, flow or ecc" << std::endl;
         return 1;
@@ -521,11 +647,15 @@ int main(int argc, char** argv) {
     if (!logImages.empty() && !std::filesystem::exists(logImages)) {
         std::filesystem::create_directories(logImages);
     }
+    // One timestamp names every file of this run (dataLog_, log_, matches_).
+    const std::string runStamp = timeToUnderscoreString();
     // Create a CSV logger for runtime data and command history.
-    const std::string logData = logPath + "dataLog_" + timeToUnderscoreString() + ".csv";
+    const std::string logData = logPath + "dataLog_" + runStamp + ".csv";
     AlgoLogger algoLogger(logData, /*write_header=*/true, /*flush_every_n=*/30);
 
-    const std::string logFile = logPath + "log_" + timeToUnderscoreString() + ".txt";
+    const std::string logFile = logPath + "log_" + runStamp + ".txt";
+    // Last match set Python sent to C++, overwritten by Python after every set.
+    const std::string matchesFile = logPath + "matches_" + runStamp + ".npz";
     Logger appLogger(logFile);
     appLogger.log("main", std::string("[mode] ") + mode);
     {
@@ -585,7 +715,9 @@ int main(int argc, char** argv) {
         targetImagePath =  expandUser("~/drone_repositioning/targets/") + "targetImage" + std::to_string(targetImageIndex) + ".jpg";
     }
 
-    PythonProcess python = launch_python_posix(onnx_matches, targetImagePath, appLogger);
+    PythonProcess python = launch_python_posix(onnx_matches, targetImagePath, appLogger,
+        lkRefine ? std::vector<std::string>{"--save-matches", matchesFile}
+                 : std::vector<std::string>{"--save-matches", matchesFile, "--no-lk"});
     {
         std::ostringstream ss;
         ss << "Launched Python process for matches with target image: " << targetImagePath;
@@ -608,6 +740,35 @@ int main(int argc, char** argv) {
     // Load the target image matcher used for alignment estimation.
     ImageMatcher matcher(appLogger, targetImagePath, cameraMatrix);
     matcher.setEccEnabled(transSource == "ecc" || eccLog);
+    {
+        pnec::PNECOptions pnecOptions;
+        pnecOptions.rotationMethod = rotEstimator == "e" ? pnec::RotationMethod::Essential
+                                   : rotEstimator == "nec" ? pnec::RotationMethod::NEC
+                                   : pnec::RotationMethod::PNEC;
+        matcher.setPnecOptions(pnecOptions);
+        matcher.setIdentityCovariance(covMode == "identity");
+    }
+    {
+        // The run's configuration, in the log and as config_<stamp>.txt next to the
+        // other files of the run, so ablation results can be grouped by setting.
+        std::ostringstream ss;
+        ss << "rot-estimator=" << rotEstimator << "\n"
+           << "cov=" << covMode << "\n"
+           << "lk=" << lkRefine << "\n"
+           << "control=" << controlName << "\n"
+           << "pd-td=" << pdTd << "\n"
+           << "pid-ti=" << pidTi << "\n"
+           << "pid-izone=" << pidIzone << "\n"
+           << "trans-source=" << transSource << "\n"
+           << "settle-px=" << settlePx << "\n"
+           << "axis-settle-px=" << axisSettlePx << "\n"
+           << "osc-arrival=" << oscArrival << "\n"
+           << "target=" << targetImagePath << "\n";
+        std::ofstream(logPath + "config_" + runStamp + ".txt") << ss.str();
+        std::string oneLine = ss.str();
+        std::replace(oneLine.begin(), oneLine.end(), '\n', ' ');
+        appLogger.log("main", "Ablation config: " + oneLine);
+    }
     appLogger.log("main", "Translation source: " + transSource + " settle-px=" + std::to_string(settlePx) + " axis-settle-px=" + std::to_string(axisSettlePx) + " osc-arrival=" + std::to_string(oscArrival)
                   + " ecc=" + std::to_string(transSource == "ecc" || eccLog));
     {
@@ -620,6 +781,8 @@ int main(int argc, char** argv) {
     bool atTarget = false;
     TranslationGate translationGate;
     FitGate fitGate(settlePx, axisSettlePx, oscArrival);
+    VectorController rotationController, translationController;
+    AxisController parallaxSpeedController;
     double arrivalTime = 0.0;
 
     // Main repositioning loop: wait for start, process frames, and send commands.
@@ -747,16 +910,19 @@ int main(int argc, char** argv) {
 
         // Compute command velocities. Parallax source: translation saturates on its
         // magnitude so the filtered direction is kept. Flow/ecc: per axis (below).
-        cv::Point3f angleRateCmd = kMaxRotationRate * activation(rotation, kRotationGain);
+        cv::Point3f angleRateCmd = rotationController.update(rotation, kMaxRotationRate, kRotationGain,
+                                                             rotationLaw, nowSec, false);
         cv::Point3f cmdVx(0, 0, 0);
         const float transNorm = static_cast<float>(cv::norm(translation));
         if (transSource != "parallax") {
             // Per-axis speed, like rotation: each axis follows its own error, and a
             // settled axis (zero error) gets zero speed.
-            cmdVx = kMaxVelocity * activation(translation, kTranslationGain);
-        } else if (transNorm > 1e-6f) {
-            const float speed = kMaxVelocity * activation(cv::Point3f(transNorm, 0, 0), kTranslationGain).x;
-            cmdVx = translation * (speed / transNorm);
+            cmdVx = translationController.update(translation, kMaxVelocity, kTranslationGain,
+                                                 translationLaw, nowSec, true);
+        } else {
+            const float speed = parallaxSpeedController.update(transNorm, kMaxVelocity, kTranslationGain,
+                                                               translationLaw, nowSec, transNorm > 1e-6f);
+            if (transNorm > 1e-6f) cmdVx = translation * (speed / transNorm);
         }
 
         {
