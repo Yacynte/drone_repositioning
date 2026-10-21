@@ -40,7 +40,15 @@
 // it from the current-frame keypoint).
 namespace pnec {
 
+// Rotation estimator, for the ablation study (--rot-estimator):
+//   Essential: 5-point RANSAC essential matrix, decomposed with recoverPose;
+//   NEC:       stops after stage 2 (RANSAC init + unweighted NEC eigenvalue refinement),
+//              t is the NEC eigenvector;
+//   PNEC:      the full pipeline (default).
+enum class RotationMethod { Essential, NEC, PNEC };
+
 struct PNECOptions {
+    RotationMethod rotationMethod = RotationMethod::PNEC;
     double regularization = 1e-13;   // c added to sigma^2 (reference configs: 1e-13)
     int sphereSamples = 200;         // translation init candidates (one hemisphere)
     int necIterations = 50;          // NEC rotation init (t eliminated)
@@ -89,6 +97,8 @@ public:
         totalError = 0.0;
         t = Vector3d::Zero();
         timings_ = Timings();
+        succeeded_ = false;
+        failure_.clear();
         auto tic = std::chrono::steady_clock::now();
         auto lap = [&tic](double& slot) {
             const auto now = std::chrono::steady_clock::now();
@@ -97,6 +107,30 @@ public:
         };
         if (allMatches.size() < 6 || !R.allFinite()) {
             logger.log("pnec", "error: too few matches or invalid R for PNEC");
+            failure_ = "too few matches";
+            R = Matrix3d::Identity();
+            return;
+        }
+
+        // Ablation: rotation from the essential matrix alone.
+        if (opt_.rotationMethod == RotationMethod::Essential) {
+            Matrix3d R_E;
+            Vector3d t_E;
+            std::vector<MatchData> inliers;
+            const bool ok = essentialPose(allMatches, R_E, t_E, inliers);
+            lap(timings_.initMs);
+            if (!ok) {
+                logger.log("pnec", "error: no essential matrix, R = I, t = 0");
+                failure_ = "no essential matrix";
+                R = Matrix3d::Identity();
+                return;
+            }
+            R = R_E;
+            totalError = robustCost(inliers, R, t_E.normalized());
+            // recoverPose already chose the sign of t by cheirality.
+            if (hasTranslationSignal(inliers, R)) t = t_E.normalized();
+            lap(timings_.guardsMs);
+            succeeded_ = true;
             return;
         }
 
@@ -116,10 +150,26 @@ public:
         lap(timings_.initMs);
         if (matches.size() < 6) {
             logger.log("pnec", "error: too few inliers");
+            failure_ = "too few inliers";
+            R = Matrix3d::Identity();
             return;
         }
         necInit(matches, R, opt_.necIterations);
         lap(timings_.necMs);
+
+        // Ablation: NEC stops here; t is the eigenvector of the smallest eigenvalue of M(R).
+        if (opt_.rotationMethod == RotationMethod::NEC) {
+            Vector3d t_nec;
+            necResiduals(matches, R, Vector3d::UnitZ(), &t_nec);
+            totalError = robustCost(matches, R, t_nec);
+            if (hasTranslationSignal(matches, R)) {
+                t = t_nec;
+                checkAndFlipCheirality(matches, R, t);
+            }
+            lap(timings_.guardsMs);
+            succeeded_ = true;
+            return;
+        }
 
         // 1. Weighted rounds: R with t fixed, then t with the PNEC weights.
         Vector3d t_dir = initialTranslation(matches, R, t_seed);
@@ -145,6 +195,7 @@ public:
             checkAndFlipCheirality(matches, R, t);
         }
         lap(timings_.guardsMs);
+        succeeded_ = true;
     }
 
     // Wall time of each stage of the last estimate() call, in ms.
@@ -164,6 +215,11 @@ public:
     // ... and the matching-noise level in pixels, fx * sqrt(lambda0) of the NEC
     // normal matrix (NaN if the eigen-decomposition was not reached).
     double lastNoisePx() const { return noisePx_; }
+    // Whether the last estimate() produced a rotation estimate. When false, R = I and
+    // t = 0 (no previous estimate is carried over, which would act as a filter) and the
+    // frame must not be used as a measurement; lastFailure() says why.
+    bool lastSucceeded() const { return succeeded_; }
+    const std::string& lastFailure() const { return failure_; }
 
 private:
     Logger& logger;
@@ -171,6 +227,8 @@ private:
     PNECOptions opt_;
     Timings timings_;
     double voteMargin_ = 0.0;   // share of matches agreeing with the chosen sign of t
+    bool succeeded_ = false;
+    std::string failure_;
     double noisePx_ = std::numeric_limits<double>::quiet_NaN();   // fx * sqrt(lambda0)
 
     using Vector5d = Eigen::Matrix<double, 5, 1>;
@@ -443,38 +501,10 @@ private:
     // Returns the inlier matches; sets R (and t_seed when the E candidate wins).
     std::vector<MatchData> initFromEssentialOrPrevious(const std::vector<MatchData>& matches,
                                                        Matrix3d& R, Vector3d& t_seed) {
-        std::vector<cv::Point2d> pTgt, pCur;
-        std::vector<int> map;   // index into matches (bearings with z <= 0 are skipped)
-        for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
-            const Vector3d& b1 = matches[i].bearing1;
-            const Vector3d& b2 = matches[i].bearing2;
-            if (b1.z() <= 1e-6 || b2.z() <= 1e-6) continue;
-            pTgt.emplace_back(b2.x() / b2.z(), b2.y() / b2.z());
-            pCur.emplace_back(b1.x() / b1.z(), b1.y() / b1.z());
-            map.push_back(i);
-        }
-
-        bool haveE = false;
         Matrix3d R_E = Matrix3d::Identity();
         Vector3d t_E = Vector3d::Zero();
         std::vector<MatchData> inliers;
-        if (pTgt.size() >= 5) {
-            cv::Mat mask;
-            const double thr = opt_.essentialThresholdPx / K_(0, 0);
-            cv::Mat E = cv::findEssentialMat(pTgt, pCur, 1.0, cv::Point2d(0, 0), cv::RANSAC,
-                                             opt_.essentialConfidence, thr,
-                                             opt_.essentialMaxIterations, mask);
-            if (E.rows == 3 && E.cols == 3) {   // several solutions come stacked: use the first
-                cv::Mat Rcv, tcv;
-                cv::recoverPose(E, pTgt, pCur, Rcv, tcv, 1.0, cv::Point2d(0, 0), mask);
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) R_E(r, c) = Rcv.at<double>(r, c);
-                t_E = Vector3d(tcv.at<double>(0), tcv.at<double>(1), tcv.at<double>(2));
-                for (int k = 0; k < mask.rows; ++k)
-                    if (mask.at<uchar>(k)) inliers.push_back(matches[map[k]]);
-                haveE = R_E.allFinite() && inliers.size() >= 6;
-            }
-        }
+        const bool haveE = essentialPose(matches, R_E, t_E, inliers);
 
         if (!haveE) {
             // No usable E (typically near pure rotation, where recoverPose's cheirality
@@ -499,6 +529,41 @@ private:
            << inliers.size() << "/" << matches.size();
         logger.log("pnec", ss.str());
         return inliers;
+    }
+
+    // 5-point RANSAC essential matrix on normalised coordinates, decomposed with
+    // recoverPose (cheirality picks R and the sign of t). X_cur = R_E X_tgt + t_E.
+    // Returns false if no usable solution was found.
+    bool essentialPose(const std::vector<MatchData>& matches, Matrix3d& R_E, Vector3d& t_E,
+                       std::vector<MatchData>& inliers) const {
+        std::vector<cv::Point2d> pTgt, pCur;
+        std::vector<int> map;   // index into matches (bearings with z <= 0 are skipped)
+        for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
+            const Vector3d& b1 = matches[i].bearing1;
+            const Vector3d& b2 = matches[i].bearing2;
+            if (b1.z() <= 1e-6 || b2.z() <= 1e-6) continue;
+            pTgt.emplace_back(b2.x() / b2.z(), b2.y() / b2.z());
+            pCur.emplace_back(b1.x() / b1.z(), b1.y() / b1.z());
+            map.push_back(i);
+        }
+        R_E = Matrix3d::Identity();
+        t_E = Vector3d::Zero();
+        inliers.clear();
+        if (pTgt.size() < 5) return false;
+        cv::Mat mask;
+        const double thr = opt_.essentialThresholdPx / K_(0, 0);
+        cv::Mat E = cv::findEssentialMat(pTgt, pCur, 1.0, cv::Point2d(0, 0), cv::RANSAC,
+                                         opt_.essentialConfidence, thr,
+                                         opt_.essentialMaxIterations, mask);
+        if (E.rows < 3 || E.cols != 3) return false;   // several solutions come stacked: use the first
+        cv::Mat Rcv, tcv;
+        cv::recoverPose(E.rowRange(0, 3), pTgt, pCur, Rcv, tcv, 1.0, cv::Point2d(0, 0), mask);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) R_E(r, c) = Rcv.at<double>(r, c);
+        t_E = Vector3d(tcv.at<double>(0), tcv.at<double>(1), tcv.at<double>(2));
+        for (int k = 0; k < mask.rows; ++k)
+            if (mask.at<uchar>(k)) inliers.push_back(matches[map[k]]);
+        return R_E.allFinite() && t_E.allFinite() && inliers.size() >= 6;
     }
 
     // Mean NEC energy lambda_min(M(R)) / N.

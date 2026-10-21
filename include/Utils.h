@@ -6,6 +6,7 @@
 #include <iostream>
 #include <unordered_map>
 #include <string>
+#include <vector>
 #include <iomanip>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -48,8 +49,10 @@ private:
 
 // Forks and execs "python3 -u <onnx_matches> --target <target>" without blocking the
 // caller, with Python's stdout and stderr piped into logger (see PythonProcess).
+// extraArgs: appended to the Python command line (e.g. --save-matches <file>, --no-lk).
 PythonProcess launch_python_posix(const std::string& onnx_matches, const std::string& target,
-                                  Logger& logger);
+                                  Logger& logger,
+                                  const std::vector<std::string>& extraArgs = {});
 
 // Squashes each component of x through the given activation ("sigmoid", "tanh", or
 // "gaussian"; unrecognized names pass x through unchanged) with gain k, used to turn

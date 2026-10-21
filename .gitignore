@@ -12,9 +12,9 @@ build_debug/
 /data
 LightGlue*
 targets_sim_old/*
-weights/*
-!weights/lightglue_patched.onnx
-!weights/superpoint.onnx
+# weights/*
+# !weights/lightglue_patched.onnx
+# !weights/superpoint.onnx
 controls/
 logData*
 LogData*

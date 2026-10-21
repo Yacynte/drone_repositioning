@@ -20,6 +20,7 @@ import os
 import struct
 import time
 import argparse
+import sys
 import signal
 import onnxruntime as ort
 
@@ -40,6 +41,12 @@ class FeatureMatcherONNX:
     # with on the C++ side.
     def __init__(self, target_image_path, shm_name="single_frame_shm"):
         self.running = True
+        # Set from --save-matches: .npz file overwritten with every match set sent
+        # to C++ (see _save_last_matches). None disables saving.
+        self.save_path = None
+        # Lucas-Kanade sub-pixel refinement of the matches; --no-lk turns it off
+        # (ablation: detector positions only).
+        self.lk_refine = True
         self.WIDTH = 1920
         self.HEIGHT = 1080
 
@@ -488,7 +495,8 @@ class FeatureMatcherONNX:
 
                 mkpts0_filtered, mkpts1_filtered, scores_filtered = self._filter_by_grid(mkpts0, mkpts1, scores)
                 lap("filter")
-                mkpts0_filtered = self._refine_lk(cur_image_, mkpts0_filtered, mkpts1_filtered)
+                if self.lk_refine:
+                    mkpts0_filtered = self._refine_lk(cur_image_, mkpts0_filtered, mkpts1_filtered)
                 lap("lk")
                 covariances = self._compute_patch_covariances_numpy(cur_image_, mkpts0_filtered)
                 lap("cov")
@@ -532,6 +540,11 @@ class FeatureMatcherONNX:
         struct.pack_into('<IIdd', self.buf, self.TIMING_OFFSET, int(cam_frame_id), 0,
                          float(t_frame), time.time())
         self.buf[1] = 0
+        if self.save_path:
+            try:
+                self._save_last_matches(frame_id, cam_frame_id, mkpts0, mkpts1, mscores, covariances)
+            except Exception as e:  # a failed save must not stop matching
+                print(f"[FeatureMatcher] Could not save matches: {e}")
         return frame_id
 
     # Signals is_alive=0 on the matches segment (so SPSGReader knows to stop) and
@@ -544,10 +557,35 @@ class FeatureMatcherONNX:
         self.shm.unlink()
         print("[FeatureMatcher] Cleaned up.")
 
+    # Overwrites self.save_path with the match set just sent to C++: exactly the
+    # arrays written to shared memory (float32, full-resolution pixels; mkpts0 is the
+    # current frame after LK, mkpts1 the target, covariances the structure tensor
+    # xx, xy, yy). Written to a temporary file and renamed, so the file is never left
+    # half-written if the process is stopped, and after the run it holds the last set.
+    def _save_last_matches(self, match_id, cam_frame_id, mkpts0, mkpts1, mscores, covariances):
+        tmp = self.save_path + ".tmp"
+        with open(tmp, "wb") as f:
+            np.savez(f, match_id=np.int64(match_id), cam_frame=np.int64(cam_frame_id),
+                     t=np.float64(time.time()), mkpts0=mkpts0, mkpts1=mkpts1,
+                     scores=mscores, covariances=covariances)
+        os.replace(tmp, self.save_path)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', default="/home/user/drone_repositioning/targets/Capture_001.png")
+    parser.add_argument('--save-matches', default=None,
+                        help="overwrite this .npz file with every match set sent to C++")
+    parser.add_argument('--no-lk', action='store_true',
+                        help="skip the Lucas-Kanade sub-pixel refinement (ablation)")
     args = parser.parse_args()
 
+    # C++ sends SIGTERM if Python does not exit in time; turn it into SystemExit so
+    # run()'s finally block still releases the shared memory.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+
     matcher = FeatureMatcherONNX(target_image_path=args.target)
+    matcher.save_path = args.save_matches
+    matcher.lk_refine = not args.no_lk
+    print(f"[FeatureMatcher] LK refinement: {'on' if matcher.lk_refine else 'off'}", flush=True)
+    matcher.target_path = args.target
     matcher.run()

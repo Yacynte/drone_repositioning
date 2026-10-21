@@ -16,7 +16,7 @@ void launch_python(const std::string& target) {
 }
 
 PythonProcess launch_python_posix(const std::string& onnx_matches, const std::string& target,
-                                  Logger& logger) {
+                                  Logger& logger, const std::vector<std::string>& extraArgs) {
     int fds[2];
     if (pipe(fds) != 0) {
         logger.log("main", "error: pipe() failed, starting Python without output logging");
@@ -32,7 +32,12 @@ PythonProcess launch_python_posix(const std::string& onnx_matches, const std::st
             close(fds[1]);
         }
         setenv("PYTHONUNBUFFERED", "1", 1);
-        execlp("python3", "python3", "-u", onnx_matches.c_str(), "--target", target.c_str(), nullptr);
+        std::vector<std::string> args = {"python3", "-u", onnx_matches, "--target", target};
+        args.insert(args.end(), extraArgs.begin(), extraArgs.end());
+        std::vector<char*> argv;
+        for (auto& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        execvp("python3", argv.data());
         _exit(127); // exec failed
     }
     if (pid < 0) {
