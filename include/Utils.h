@@ -87,6 +87,13 @@ struct Matches {
 // convention (x forward, y right, z up).
 cv::Point3f ConvertCVToUE(const cv::Point3f& p);
 
+// Remaps an OpenCV-convention point (x right, y down, z forward) into PX4's body-frame
+// FRD convention (x forward, y right, z down) used for MAVLink body-frame velocity
+// setpoints. Same as ConvertCVToUE but without the vertical-axis negation, since CV's
+// y (down) and PX4's z (down) already point the same way -- UE's z (up) is what needed
+// the flip.
+cv::Point3f ConvertCVToPX4(const cv::Point3f& p);
+
 // Remaps an OpenCV-convention rotation (roll/pitch/yaw) into Unreal Engine's
 // pitch/yaw/roll ordering.
 cv::Point3f ConvertCVToUERot(const cv::Point3f& r);

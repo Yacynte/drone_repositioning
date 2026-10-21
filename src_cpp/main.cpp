@@ -43,6 +43,24 @@ constexpr float kTranslationGain = 0.15f;
 constexpr float kMaxVelocity = 30.0f;
 constexpr float kMaxRotationRate = 5.0f;
 
+// Hard cap on how much the final angleRateCmd/cmdVx may change per second, applied
+// just before they're sent to DroneManager, so a single noisy frame (a bad match
+// set, a gate mode flip) can't show up as a sharp jump/swing in the commanded
+// velocity sent to PX4. Clamps the step itself, scaled by the actual elapsed time
+// (dt), so it caps worst-case jumps regardless of frame rate or how noisy the raw
+// signal is -- a hard bound, not a proportional damping.
+//
+// Expressed as a ramp time rather than a raw rate, since that's the knob that
+// actually matters: how long a legitimate command takes to reach full scale from
+// zero. kCmdRampTimeSec previously defaulted to kMaxRotationRate/kMaxVelocity
+// themselves as the rate, i.e. a full 1 s ramp (2 s for a full -max to +max swing)
+// -- too sluggish for a ~16 fps loop that needs to react within a few frames.
+// Smaller = snappier real response but a single bad frame moves the output further
+// before the next frame corrects it; larger = the opposite. Tune this one number.
+constexpr float kCmdRampTimeSec = 0.2f;  // reach full-scale output in ~0.2 s (~3 frames at 16 fps)
+constexpr float kCmdMaxRatePerSec_Rot   = kMaxRotationRate / kCmdRampTimeSec;  // deg/s^2
+constexpr float kCmdMaxRatePerSec_Trans = kMaxVelocity / kCmdRampTimeSec;      // cm/s^2
+
 // ── Translation gate: when to move, and when translation has arrived ─────────────
 // Replaces the old per-axis 3 px deadband in respositionFunc, which (a) counted frames
 // where PNEC set t = 0 for lack of signal as "arrived" (runs stopped ~1 m short) and
@@ -71,6 +89,41 @@ constexpr float  kLimitMinDecrease  = 0.05f; // recent median must be >= (1 - th
 // kMaxOutlierStreak consecutive drops the jump is taken as real and accepted.
 constexpr float  kOutlierFactor     = 3.0f;
 constexpr int    kMaxOutlierStreak  = 3;
+
+// Clamps how fast a cv::Point3f command may change, in units/sec, independent of
+// frame rate: the allowed step this call is maxRatePerSec * dt, dt measured from
+// the previous call's nowSec. A hard bound on the step -- it guarantees the output
+// can never jump further than the rate allows, however large the raw input swing
+// is. First call adopts the input with no clamp (nothing to ramp from yet).
+struct SlewLimit3 {
+    explicit SlewLimit3(float maxRatePerSec) : maxRatePerSec_(maxRatePerSec) {}
+
+    cv::Point3f update(const cv::Point3f& x, double nowSec) {
+        if (!init_) {
+            value_ = x;
+            lastSec_ = nowSec;
+            init_ = true;
+            return value_;
+        }
+        const float dt = static_cast<float>(std::clamp(nowSec - lastSec_, 0.0, 1.0));
+        lastSec_ = nowSec;
+        const float maxDelta = maxRatePerSec_ * dt;
+        auto clampAxis = [maxDelta](float prev, float target) {
+            return prev + std::clamp(target - prev, -maxDelta, maxDelta);
+        };
+        value_ = cv::Point3f(
+            clampAxis(value_.x, x.x),
+            clampAxis(value_.y, x.y),
+            clampAxis(value_.z, x.z));
+        return value_;
+    }
+
+private:
+    float maxRatePerSec_;
+    cv::Point3f value_{0, 0, 0};
+    double lastSec_ = 0.0;
+    bool init_ = false;
+};
 
 struct TranslationGate {
     struct Result {
@@ -620,6 +673,8 @@ int main(int argc, char** argv) {
     bool atTarget = false;
     TranslationGate translationGate;
     FitGate fitGate(settlePx, axisSettlePx, oscArrival);
+    SlewLimit3 rotCmdSlew(kCmdMaxRatePerSec_Rot);
+    SlewLimit3 transCmdSlew(kCmdMaxRatePerSec_Trans);
     double arrivalTime = 0.0;
 
     // Main repositioning loop: wait for start, process frames, and send commands.
@@ -718,7 +773,7 @@ int main(int argc, char** argv) {
         
         const cv::Point3f rotation = rotationVec;
         const cv::Point3f unitDir = hasNanTrans ? cv::Point3f(0, 0, 0)
-                                  : (unrealTest ? ConvertCVToUE(direction) : direction);
+                                  : (unrealTest ? ConvertCVToUE(direction) : ConvertCVToPX4(direction));
         const double nowSec = std::chrono::duration<double>(tAlign0.time_since_epoch()).count();
         // The parallax gate always runs so its decision stays in the log for comparison.
         const auto gate = translationGate.update(unitDir, transError, matcher.lastNoisePx(), nowSec);
@@ -732,7 +787,7 @@ int main(int argc, char** argv) {
         bool translationAligned = gate.aligned;
         if (transSource != "parallax") {
             const TranslationFit& fit = transSource == "ecc" ? matcher.lastEccFit() : matcher.lastFlowFit();
-            const cv::Point3f err = unrealTest ? ConvertCVToUE(fit.errorPx()) : fit.errorPx();
+            const cv::Point3f err = unrealTest ? ConvertCVToUE(fit.errorPx()) : ConvertCVToPX4(fit.errorPx());
             const auto fg = fitGate.update(fit.valid, err, nowSec);
             translation = fg.error;
             translationAligned = fg.aligned;
@@ -772,6 +827,18 @@ int main(int argc, char** argv) {
         {
             std::ostringstream ss;
             ss << "transError: " << transError;
+            appLogger.log("main", ss.str());
+        }
+
+        // Hard-cap the final commands' rate of change so a single noisy frame can't
+        // show up as a sharp swing at PX4. Applied last, after gating/sigmoid, so it
+        // bounds whatever actually got computed this frame regardless of mode.
+        // angleRateCmd = rotCmdSlew.update(angleRateCmd, nowSec);
+        cmdVx = transCmdSlew.update(cmdVx, nowSec);
+        {
+            std::ostringstream ss;
+            ss << "finalCmd: rate=" << angleRateCmd.x << "," << angleRateCmd.y << "," << angleRateCmd.z
+               << " vel=" << cmdVx.x << "," << cmdVx.y << "," << cmdVx.z;
             appLogger.log("main", ss.str());
         }
         // float rotErrDeg = Eigen::AngleAxisd(rotationMatrix).angle() * 180.0 / M_PI;   // R: Eigen::Matrix3d

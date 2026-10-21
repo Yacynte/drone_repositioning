@@ -148,6 +148,15 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p)
     );
 }
 
+cv::Point3f ConvertCVToPX4(const cv::Point3f& p)
+{
+    return cv::Point3f(
+        p.z,      // forward
+        p.x,      // right
+        p.y       // down (no negation: CV's y-down already matches PX4's z-down)
+    );
+}
+
 cv::Point3f ConvertCVToUERot(const cv::Point3f& r)
 {
     return cv::Point3f(
