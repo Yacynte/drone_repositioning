@@ -1,13 +1,18 @@
 #include "ImageMatcher.h"
 #include <opencv2/opencv.hpp>
 #include <opencv2/features2d.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <chrono>
 #include <iostream>
-
+#include <algorithm>
+#include <sstream>
+#include "Utils.h"
 
 
 // pts1, pts2 are matched pixel points (same length), already filtered by inliers if possible
 // K is 3x3 double, R is 3x3 double from recoverPose (rotation from cam1 -> cam2)
 
+// Projects a 3D ray x through intrinsics K onto the image plane (pinhole projection).
 static inline cv::Point2f projectPoint(const cv::Mat& K, const cv::Vec3d& x)
 {
     double X = x[0], Y = x[1], Z = x[2];
@@ -16,6 +21,12 @@ static inline cv::Point2f projectPoint(const cv::Mat& K, const cv::Vec3d& x)
     return cv::Point2f((float)u, (float)v);
 }
 
+// Estimates the pixel-space translation residual left over after "undoing" the known
+// rotation R: for each inlier match, unprojects pts1[i], rotates it by R, reprojects
+// it back to pixels, and measures how far that rotation-only prediction is from the
+// observed pts2[i]. Returns the median (robust to outliers) residual over both axes;
+// (0,0) if there are fewer than 8 usable points. Used by getAlignmentDisplacement()
+// as a cheap alternative to a full essential-matrix decomposition.
 cv::Point2f rotationCompensatedResidual(
     const std::vector<cv::Point2f>& pts1,
     const std::vector<cv::Point2f>& pts2,
@@ -74,6 +85,13 @@ cv::Point2f rotationCompensatedResidual(
 }
 
 
+// Estimates a scalar "zoom" (approach/recede) signal as the median ratio of each
+// inlier match's distance from the image center in pts2 vs. pts1, returned as
+// log(ratio) so it's symmetric around 0. KNOWN LIMITATION: despite the name/K,R
+// params, this does NOT actually rotate pts1 before comparing (see the inlined
+// /*p_rot*/ note below) — it only compares raw radial distances, so a pure rotation
+// (no zoom) can still produce a nonzero result. Returns 0 if fewer than 8 usable
+// points.
 float rotationCompensatedZoom(
     const std::vector<cv::Point2f>& pts1,
     const std::vector<cv::Point2f>& pts2,
@@ -103,42 +121,15 @@ float rotationCompensatedZoom(
 }
 
 
-// ImageMatcher::ImageMatcher1(const std::string& targetImagePath) {
-//     // Load target image
-//     cv::Mat target = cv::imread(targetImagePath, cv::IMREAD_COLOR);
-//     if (target.empty()) {
-//         throw std::runtime_error("Could not load target image");
-//     }
-//     cv::cvtColor(target, targetImageGray, cv::COLOR_BGR2GRAY);
-
-//     // Initialize SIFT detector and BFMatcher
-//     // sift = cv::SIFT::create();
-//     sift = cv::SIFT::create(5000,    // nfeatures    — default 0 (unlimited, but keeps best), set explicitly
-//                             3,       // nOctaveLayers — default 3, increase for more features
-//                             0.05,    // contrastThreshold — default 0.04, LOWER = more features
-//                             10,      // edgeThreshold — default 10, HIGHER = more features  
-//                             1.6      // sigma — default 1.6, leave this
-//                             );
-//     // matcher = cv::BFMatcher::create(cv::NORM_L2);
-
-//     matcherFlann = cv::FlannBasedMatcher(cv::makePtr<cv::flann::KDTreeIndexParams>(5),
-//                                         cv::makePtr<cv::flann::SearchParams>(75));
-
-//     height = target.rows;
-//     width = target.cols;
-//     cameraMatrix = (cv::Mat_<float>(3,3) << 
-//                     width / 2.0f, 0,            width / 2.0f,
-//                     0,            width / 2.0f, height / 2.0f,
-//                     0,            0,            1.0f);
-//     // Detect and compute features for target
-//     cv::Mat targetDesc;
-//     detectAndComputegrid(targetImageGray, targetKeypoints, targetDesc);
-//     // detectAndCompute(targetImageGray, targetKeypoints, targetDesc);
-//     targetDesc.convertTo(targetDescriptors, CV_32F);
-    
-//     std::cout << "Target keypoints size: " << targetKeypoints.size() << std::endl;
-// }
-
+// Loads the target image and converts it to grayscale. Note: this does NOT populate
+// targetKeypoints/targetDescriptors (SIFT features of the target) — nothing in the
+// current codebase does. That's harmless for the live pipeline, since
+// getAlignment(matches, frame) (the only entry point main.cpp calls) takes
+// pre-computed SuperPoint/LightGlue matches and never touches targetKeypoints. But it
+// means the SIFT-based paths that DO read targetKeypoints/targetDescriptors —
+// getAlignmentDisplacement(), getAlignmentDisplacementRansac(), getAlignmentDirection(),
+// getAlignmentOld() — are effectively broken (they'll always match against an empty
+// target) unless something is added to detect/compute target features first.
 ImageMatcher::ImageMatcher(Logger& logger, const std::string& targetImagePath, const cv::Mat& K_cv): logger(logger)
 {
     cameraMatrix = K_cv.clone();
@@ -159,13 +150,18 @@ ImageMatcher::ImageMatcher(Logger& logger, const std::string& targetImagePath, c
     }
 }
 
+// Plain SIFT detect+compute, no spatial filtering.
 void ImageMatcher::detectAndCompute(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
     sift->detectAndCompute(image, cv::noArray(), keypoints, descriptors);
 }
+// Unused placeholder — see header comment.
 void ImageMatcher::detectAndComputeLKFlow(){
 
 }
 
+// SIFT detect, then bucket keypoints into a gridX x gridY grid and keep only the
+// maxPerCell strongest (by response) per cell before computing descriptors. This
+// keeps keypoints from clustering entirely in one high-texture region of the image.
 void ImageMatcher::detectAndComputegrid(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints,
                                     cv::Mat& descriptors, int gridX, int gridY, int maxPerCell)
 {
@@ -176,7 +172,6 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image, std::vector<cv::Ke
     // 2. Divide image into grid
     int cellW = image.cols / gridX;
     int cellH = image.rows / gridY;
-    // std::cout << "All Keypoints detected: " << allKeypoints.size() << std::endl;
     std::vector<std::vector<cv::KeyPoint>> grid(gridX * gridY);
 
     for (auto& kp : allKeypoints)
@@ -200,9 +195,7 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image, std::vector<cv::Ke
     }
 
     // 4. Compute descriptors for selected keypoints
-    // cv::Mat ImageDesc;
     sift->compute(image, keypoints, descriptors);
-    // ImageDesc.convertTo(descriptors, CV_32F);
     {
         std::ostringstream ss;
         ss << "All Keypoints detected: " << keypoints.size();
@@ -211,6 +204,10 @@ void ImageMatcher::detectAndComputegrid(const cv::Mat& image, std::vector<cv::Ke
 }
 
 
+// SIFT-based alignment: matches inputImage against the target and returns a raw 2D
+// pixel-space displacement (average match motion vector) plus a crude in/out "zMotion"
+// heuristic (based on whether matches move toward or away from the image center). Not
+// called by the live pipeline — see the KNOWN LIMITATION note on the constructor above.
 cv::Point3f ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     cv::Mat inputGray;
     cv::cvtColor(inputImage, inputGray, cv::COLOR_BGR2GRAY);
@@ -218,9 +215,6 @@ cv::Point3f ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     std::vector<cv::KeyPoint> inputKeypoints;
     cv::Mat inputDescriptors;
     detectAndComputegrid(inputGray, inputKeypoints, inputDescriptors);
-
-    // std::vector<cv::DMatch> matches;
-    // matcher->match(inputDescriptors, targetDescriptors, matches);
 
     std::vector<cv::DMatch> goodMatches;
     {
@@ -267,32 +261,25 @@ cv::Point3f ImageMatcher::getAlignmentDisplacement(const cv::Mat& inputImage) {
     direction2D.x /= goodMatches.size();
     direction2D.y /= goodMatches.size();
     zMotion /= goodMatches.size(); // average tendency
-    // double d_pixels = std::sqrt(direction2D.x*direction2D.x + direction2D.y*direction2D.y);
-    // float dist_z = cv::norm(direction2D);
-    // zMotion *= dist_z; // scale by overall motion magnitude
     return cv::Point3f(direction2D.x, direction2D.y, zMotion);
-    // return zMotion;
 }
 
+// KNN-matches inputDescriptors against targetDescriptors (k=2) and keeps only matches
+// that pass Lowe's ratio test (best match clearly better than second-best), which
+// filters out ambiguous matches in repetitive/low-texture regions.
 std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptors) {
     // KNN match to find the two best matches for each descriptor
     std::vector<std::vector<cv::DMatch>> matchesAB;
-    // matcher->knnMatch(inputDescriptors, targetDescriptors, matchesAB, 2);
     matcherFlann.knnMatch(inputDescriptors, targetDescriptors, matchesAB, 2);
-    // std::vector<std::vector<cv::DMatch>> matchesBA;
-    // matcherFlann.knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
-    // matcher->knnMatch(targetDescriptors, inputDescriptors, matchesBA, 2);
     {
         std::ostringstream ss;
         ss << "Total matches found: " << matchesAB.size();
         logger.log("ImageMatcher", ss.str());
     }
-    // std::cout << "Target descriptors size: " << targetDescriptors.rows << std::endl;
-    // std::cout << "Input descriptors size: " << inputDescriptors.rows << std::endl;  
-    // Apply Lowe's ratio test and cross-check
+    // Apply Lowe's ratio test
     const float ratio = 0.8f;
 
-    std::vector<cv::DMatch> goodAB, goodBA;
+    std::vector<cv::DMatch> goodAB;
 
     for (const auto& m : matchesAB){
         if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
@@ -304,36 +291,20 @@ std::vector<cv::DMatch> ImageMatcher::goodMatcher(const cv::Mat& inputDescriptor
         logger.log("ImageMatcher", ss.str());
     }
     return goodAB;
-    // for (const auto& m : matchesBA){
-    //     if (m.size() == 2 && m[0].distance < ratio * m[1].distance)
-    //         goodBA.push_back(m[0]);
-    // }
-    // // Cross-check: keep only matches that are mutual best matches
-    // std::vector<cv::DMatch> crossCheckedMatches;
-    // for (const auto& mAB : goodAB)
-    // {
-    //     for (const auto& mBA : goodBA)
-    //     {
-    //         if (mAB.queryIdx == mBA.trainIdx &&
-    //             mAB.trainIdx == mBA.queryIdx)
-    //         {
-    //             crossCheckedMatches.push_back(mAB);
-    //             break;
-    //         }
-    //     }
-    // }
-    // return crossCheckedMatches;
 }
 
 
-std::vector<cv::DMatch> ImageMatcher::gridFilterMatches(const std::vector<cv::DMatch>& matches, 
-                                                        const std::vector<cv::KeyPoint>& queryKps, 
+// Buckets matches into a gridCols x gridRows grid (by their query-image position) and
+// keeps only the maxPerCell best (lowest descriptor distance) matches per cell, so
+// the surviving matches are spread across the image instead of clustering wherever
+// SIFT found the most texture.
+std::vector<cv::DMatch> ImageMatcher::gridFilterMatches(const std::vector<cv::DMatch>& matches,
+                                                        const std::vector<cv::KeyPoint>& queryKps,
                                                         int gridCols, int gridRows, int maxPerCell)
 {
     float cellW = width  / gridCols;
     float cellH = height / gridRows;
 
-    // std::cout<< "width: "<< width << " height: " << height <<std::endl;
     // grid of matches per cell
     std::vector<std::vector<cv::DMatch>> grid(gridCols * gridRows);
 
@@ -359,8 +330,11 @@ std::vector<cv::DMatch> ImageMatcher::gridFilterMatches(const std::vector<cv::DM
 }
 
 
+// Computes the essential matrix from the member inputMatches/targetMatches (RANSAC)
+// and recovers the winning (bestR, bestT) pose from it via cv::recoverPose.
 void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT ){
-    
+
+
     cv::Mat inliersE;
     cv::Mat EssentialMat = cv::findEssentialMat(
                                 inputMatches,     // std::vector<cv::Point2f> from current frame
@@ -371,7 +345,6 @@ void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT )
                                 0.1,              // reprojection threshold in pixels
                                 inliersE
                             );
-    // int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, bestR, bestT, inliersE);
     // Now compute translation-like residual in pixels:
     cv::Point2f dxy = rotationCompensatedResidual(inputMatches, targetMatches, cameraMatrix, bestR, inliersE);
     float dz = rotationCompensatedZoom(inputMatches, targetMatches, cameraMatrix, bestR, inliersE);
@@ -381,32 +354,39 @@ void ImageMatcher::findAnddecomposeEssentialMat(cv::Mat& bestR, cv::Mat& bestT )
 }
 
 
+// SIFT-based alignment (not called by the live pipeline — see the KNOWN LIMITATION
+// note on the constructor above). If inputImage is given, re-detects/matches SIFT
+// features against the target; if it's empty, reuses whatever inputMatches/
+// targetMatches are already set (e.g. by a previous call). Then:
+//   1. Fits both a homography H and an essential matrix in parallel and compares
+//      their inlier counts (tau_H) to gauge whether the motion looks like a pure
+//      rotation (homography explains it well) or has real translation.
+//   2. Estimates the focus-of-expansion (FOE); a high residual also implies
+//      rotation-only motion (no clear expansion/contraction center).
+//   3. NOTE: the homography/"pure rotation" branch below is permanently disabled via
+//      "&& 0" — only the essential-matrix + recoverPose() branch ever runs. Whether
+//      that's deliberate (the homography path was found unreliable) or leftover from
+//      debugging is worth confirming before relying on tau_H/rotationOnlyFlag again.
 std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlignmentDirection( const cv::Mat& inputImage, bool rotationOnly){
-    
-    // cv::imwrite("inputImageGray.png", inputImage);
+
     if(inputImage.empty() && inputMatches.size() == 0) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0), cv::Point2f(0,0), std::numeric_limits<float>::infinity(), false};
 
     if (!inputImage.empty()){
 
-        cv::Mat inputGray;
         cv::cvtColor(inputImage, inputImageGray, cv::COLOR_BGR2GRAY);
-        // std::cout << "Converted to Gray" << std::endl;
         std::vector<cv::KeyPoint> inputKeypoints;
         cv::Mat inputDescriptors;
 
         std::vector<cv::Point2f>().swap(inputMatches);
         std::vector<cv::Point2f>().swap(targetMatches);
         cv::Mat inputDesc;
-        // detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
         detectAndComputegrid(inputImageGray, inputKeypoints, inputDesc);
         inputDesc.convertTo(inputDescriptors, CV_32F);
         inputDesc.release();
         std::vector<cv::DMatch> goodMatches;
-        // goodMatches = goodMatcher(inputDescriptors);
         auto matches = goodMatcher(inputDescriptors);
         goodMatches = gridFilterMatches(matches, inputKeypoints);
 
-        // std::cout << "Matched Descriptors" << std::endl;
         if (goodMatches.empty()) return {cv::Mat::eye(3, 3, CV_32F), cv::Point3f(0,0,0), cv::Point2f(0,0), std::numeric_limits<float>::infinity(), false};
         for (const auto& m : goodMatches) {
             const cv::KeyPoint& kpInput = inputKeypoints[m.queryIdx];
@@ -414,12 +394,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
 
             inputMatches.push_back(kpInput.pt);
             targetMatches.push_back(kpTarget.pt);
-            // oldMatches.target_indices.push_back(m.trainIdx);
         }
-        // oldMatches.prev_pts = inputMatches;
-        // matches_length = targetMatches.size();
-        // std::cout << " Sift features and Flann matcher " << std::endl;
-        
 
         // Setup termination criteria (Max 30 iterations or 0.01 epsilon)
         cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.01);
@@ -428,11 +403,8 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
         // winSize is the search window (5x5 or 11x11 is standard)
         cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
         cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-        // std::cout << "Prepared Matches" << std::endl;
-        
     }
 
-    // std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
     cv::Mat rotationMatrix = cv::Mat::eye(3, 3, CV_32F);
     cv::Point3f world_direction = cv::Point3f(0,0,0);
     float meanError = std::numeric_limits<float>::infinity();
@@ -475,14 +447,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     // H = [ s*cosθ  -s*sinθ  tx ]
     //     [ s*sinθ   s*cosθ  ty ]
 
-    double tx = H.at<double>(0,2);
-    double ty = H.at<double>(1,2);
-    // meanError = std::sqrt(tx*tx + ty*ty);
-
-    // std::cout << "Estimated translation magnitude (mean error): " << meanError << std::endl;
-    
     if ( (!H.empty() && ((tau_H > 0.7) || rotationOnlyFlag)) && 0) {
-        // rotationMatrix = solvePureRotation();
         cv::Mat bestR = computeRotation(H, hInliers, maskH);
         cv::transpose(bestR, rotationMatrix);
     }
@@ -490,7 +455,6 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
 
         cv::Mat bestR, bestT, bestT64, inliersE;
         int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, bestR, bestT64, inliersE);
-        // std::cout << " Recoverpose inliers " << inlierCount << std::endl;
         std::vector<cv::Point2f> inliers1, inliers2;
         for(int i = 0; i < inliersE.rows; i++) {
             if(inliersE.at<uchar>(i)) {
@@ -498,31 +462,18 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
                 inliers2.push_back(targetMatches[i]);
             }
         }
-        // std::cout << " Before ReprojectionError " << std::endl;
         meanError = getReprojectionError(inliers1, inliers2, bestR, bestT64);
-        // std::cout << " After ReprojectionError " << std::endl;
         flow = getOpticalFlow(inliers1, inliers2);
         float flow_norm = std::sqrt(flow.x*flow.x + flow.y*flow.y);
-        // error3d.x = flow.x;
-        // error3d.y = flow.y;
-        // error3d.z = 
         rotationMatrix = bestR.clone();
         cv::transpose(bestR, rotationMatrix);
         // bestT64.convertTo(bestT, CV_32F);
         cv::Mat bestT_ = - bestR.t() * bestT64;
         bestT_.convertTo(bestT, CV_32F);
-        // cv::Mat t_inv, t_inv64;
-        // t_inv = bestT * meanError;
-        // t_inv64 = -bestT64 * bestR.t() * meanError;
-        // t_inv64.convertTo(t_inv, CV_32F);
-        // world_direction = cv::Point3f(t_inv.at<float>(0,0), t_inv.at<float>(1,0), t_inv.at<float>(2,0));
         world_direction = cv::Point3f(bestT.at<float>(0,0)*flow_norm, bestT.at<float>(1,0)*flow_norm, bestT.at<float>(2,0)*flow_norm);
 
         if ((std::abs(bestT.at<float>(2,0)) > std::abs(bestT.at<float>(1,0)) + std::abs(bestT.at<float>(0,0))) && flow_norm < 10) world_direction.z *= 10;
         meanError = flow_norm;
-        // std::cout << "Estimated flow direction: " << flow << std::endl;
-        // std::cout << "Estimated translation matrix: " << std::endl << bestT << std::endl;
-        // std::cout << "world direction: " << world_direction << std::endl;
     }
     {
         std::ostringstream ss;
@@ -533,6 +484,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     return {rotationMatrix, world_direction, flow, meanError, true};
 }
 
+// Mean per-axis displacement (pts2 - pts1) over all correspondences.
 cv::Point2f ImageMatcher::getOpticalFlow(const std::vector<cv::Point2f>& pts1, const std::vector<cv::Point2f>& pts2) {
     cv::Point2f flow(0, 0);
     int count = 0;
@@ -549,10 +501,14 @@ cv::Point2f ImageMatcher::getOpticalFlow(const std::vector<cv::Point2f>& pts1, c
 }
 
 
-float ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1, 
-                                         const std::vector<cv::Point2f>& pts2, 
-                                         const cv::Mat& Rf, const cv::Mat& tf) 
-{    
+// Triangulates each pts1<->pts2 correspondence under the rigid transform (Rf, tf)
+// and returns the mean symmetric reprojection error (pixels) across both views,
+// skipping points that fail the cheirality test (behind either camera) or land at
+// infinity. Returns a large penalty (1e6) if no points pass the depth checks.
+float ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1,
+                                         const std::vector<cv::Point2f>& pts2,
+                                         const cv::Mat& Rf, const cv::Mat& tf)
+{
     if (pts1.empty() || pts1.size() != pts2.size()) return 0.0f;
 
     // Enforce float precision consistently
@@ -623,6 +579,7 @@ float ImageMatcher::getReprojectionError(const std::vector<cv::Point2f>& pts1,
     return totalError / validCount;
 }
 
+// Builds a 4x4 homogeneous transform [R | t; 0 0 0 1].
 cv::Mat ImageMatcher::formTransf(const cv::Mat& R, const cv::Mat& t) {
     cv::Mat T = cv::Mat::eye(4, 4, CV_32F);
     R.copyTo(T(cv::Rect(0, 0, 3, 3)));
@@ -630,10 +587,12 @@ cv::Mat ImageMatcher::formTransf(const cv::Mat& R, const cv::Mat& t) {
     return T;
 }
 
+// Triangulates inputMatches/targetMatches under (Rotation, translation) and counts
+// how many resulting 3D points have positive depth (Z) in both camera views — a
+// relative-scale/cheirality sanity signal (higher = more consistent geometry).
 int ImageMatcher::sumZCalRelativeScale(const cv::Mat& Rotation, const cv::Mat& translation) {
         // Form transformation matrix
         cv::Mat T = ImageMatcher::formTransf(Rotation, translation);
-        // std::cout << "In relative Scale" << std::endl;
         // Projection matrices
         cv::Mat P0 = cameraMatrix * cv::Mat::eye(3, 4, CV_32F);
         cv::Mat P1 = cameraMatrix * T(cv::Rect(0, 0, 4, 3));
@@ -651,16 +610,8 @@ int ImageMatcher::sumZCalRelativeScale(const cv::Mat& Rotation, const cv::Mat& t
         // Triangulate points
         cv::Mat hom_Q1;
         cv::triangulatePoints(P0, P1, pts1, pts2, hom_Q1);
-        // std::cout << "Triangulation successful" << std::endl;
-
         // Transform into cam2
         cv::Mat hom_Q2 = T * hom_Q1;
-
-        // Un-homogenize
-        // cv::Mat Q1 = hom_Q1.rowRange(0, 3).clone();
-        // Q1 = Q1.mul(1.0 / hom_Q1.row(3).clone().t());
-        // cv::Mat Q2 = hom_Q2.rowRange(0, 3).clone();
-        // Q2 = Q2.mul(1.0 / hom_Q2.row(3).clone().t());
 
         // Extract 3xN points
         cv::Mat Q1 = hom_Q1.rowRange(0, 3).clone();
@@ -689,29 +640,25 @@ int ImageMatcher::sumZCalRelativeScale(const cv::Mat& Rotation, const cv::Mat& t
 
 
 
+// SIFT-based alignment using a robust RANSAC affine fit instead of the essential
+// matrix (not called by the live pipeline — see the KNOWN LIMITATION note on the
+// constructor above). Fits a partial affine (rotation + uniform scale + translation)
+// between matched SIFT points, then decomposes it into a 2D center-shift (x, y) and
+// a log-scale "zoom" proxy (z) — cheaper than a full 3D pose recovery, at the cost of
+// only being valid for roughly planar/rotation-dominated scenes.
 cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputImage)
 {
-    // std::cout << "target gray size: " << targetImageGray.size() << std::endl;
-    // std::cout << "input image size: " << inputImage.size() << std::endl;
-    
     cv::cvtColor(inputImage, inputImageGray, cv::COLOR_BGR2GRAY);
 
     std::vector<cv::KeyPoint> inputKeypoints;
     cv::Mat inputDescriptors;
-    // detectAndComputegrid(inputImageGray, inputKeypoints, inputDescriptors);
     cv::Mat inputDesc;
     detectAndCompute(inputImageGray, inputKeypoints, inputDesc);
     inputDesc.convertTo(inputDescriptors,   CV_32F);
-    // std::vector<cv::DMatch> matches;
-    // matcher->match(inputDescriptors, targetDescriptors, matches);
 
     std::vector<cv::DMatch> goodMatches;
-    // std::cout << "Target image keypoint size: " << targetKeypoints.size() << std::endl;
-    // std::cout << "Input image keypoint size: " << inputKeypoints.size() << std::endl;
     auto matches = goodMatcher(inputDescriptors);
-    // std::cout << "Found matches of size: " << matches.size() << std::endl;
     goodMatches = gridFilterMatches(matches, inputKeypoints);
-    // std::cout << "Found good matches of size: " << goodMatches.size() << std::endl;
     if (goodMatches.empty()) return cv::Point3f(0,0,0);
     float zMotion = 0; // inward/outward
     cv::Point2f center(inputImageGray.cols/2.0f, inputImageGray.rows/2.0f);
@@ -737,11 +684,9 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     // winSize is the search window (5x5 or 11x11 is standard)
     cv::cornerSubPix(inputImageGray, inputMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
     cv::cornerSubPix(targetImageGray, targetMatches, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-    // std::cout << "Prepared Matches" << std::endl;
 
     zMotion /= goodMatches.size(); // average tendency
     if (std::abs(zMotion) < 0.2) zMotion = 0;
-    // if(std::abs(zMotion) < 0.35 * goodMatches.size()) zMotion = 0; 
 
     // Robust affine (rotation + uniform scale + translation), rejects outliers
     cv::Mat inliers;
@@ -779,13 +724,10 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     // Use log(s) so it's symmetric: log(1.1)=+0.095, log(0.9)=-0.105
     double z = std::log(std::max(s, 1e-6));
 
-    // Return (x,y) in pixels and z as dimensionless zoom error
-    // return cv::Point3f((float)tx, (float)ty, (float)zMotion);
     // rotation (radians)
     double theta = std::atan2(c, a);
 
     // center displacement (pixels)
-    // cv::Point2f center(inputGray.cols * 0.5f, inputGray.rows * 0.5f);
     double cx = center.x, cy = center.y;
     double cxp = a*cx + b*cy + tx;
     double cyp = c*cx + d*cy + ty;
@@ -797,18 +739,20 @@ cv::Point3f ImageMatcher::getAlignmentDisplacementRansac(const cv::Mat& inputIma
     return cv::Point3f((float)dxc, (float)dyc, (float)zMotion);
 }
 
+// Decomposes homography H into up to 4 candidate (R, t, normal) solutions
+// (cv::decomposeHomographyMat), discards the ones inconsistent with the visible
+// inlier points, and among the survivors picks the rotation whose roll component
+// (rvec.z) is closest to zero — a heuristic for picking the "upright" solution when
+// the scene is treated as a pure rotation. Only reachable via the permanently
+// disabled "&& 0" branches in getAlignmentDirection()/getAlignment(); not currently
+// exercised by the live pipeline.
 cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlierMask)
 {
     // ── PASS 1: Pure rotation via Homography ──────────────────────────
-    
+
+
     float inlierRatio = (float)hInliers / inputMatches.size();
 
-    // std::cout << "[PASS 1 - pure rotation] inliers: " << hInliers
-    //           << " ratio: " << inlierRatio
-    //           << std::endl;
-
-    // && inlierRatio > 0.2f
-    // if (!H.empty() && hInliers >= 20) {
     // Decompose homography
     std::vector<cv::Mat> Rs, ts, normals;
     cv::decomposeHomographyMat(H, cameraMatrix, Rs, ts, normals);
@@ -864,11 +808,8 @@ cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlier
             logger.log("ImageMatcher", ss.str());
         }
 
-        // return cv::Point3f(-delta_cv.y, -delta_cv.x, 0.0f); // remap to Unreal, roll=0
-        // return cv::Point3f(delta_cv.x, delta_cv.y, 0.0f);
         return bestR;
     }
-    // }
 
     // ── PASS 2: Affine fallback (rotation + translation) ─────────────
     cv::Mat inliers;
@@ -911,6 +852,8 @@ cv::Mat ImageMatcher::computeRotation(cv::Mat& H, int& hInliers, cv::Mat& inlier
     return R;
 }
 
+// Builds R = Rz(yaw) * Ry(pitch) * Rx(roll) (all angles in radians) — the inverse
+// operation of rotmatToYPRDeg_XYZ() in Utils.cpp.
 cv::Mat ImageMatcher::getRotationMatrixXYZ(double roll, double pitch, double yaw) {
     // Rotation matrices around x, y, z axes
     cv::Mat Rx = (cv::Mat_<double>(3, 3) << 
@@ -933,6 +876,13 @@ cv::Mat ImageMatcher::getRotationMatrixXYZ(double roll, double pitch, double yaw
     return R;
 }
 
+// Estimates the focus-of-expansion (FOE): the point every flow vector (pts2 - pts1)
+// would pass through if extended as a line, found via weighted least squares over
+// all the per-point flow lines. A large residual (mean distance from the fitted
+// point back to each flow line) means the flow vectors don't converge/diverge from a
+// single point — i.e. the motion looks like a rotation rather than a translation
+// toward/away from some point in the scene. Used by getAlignmentDirection() to flag
+// rotation-only frames.
 FOEResult ImageMatcher::computeFOE(const std::vector<cv::Point2f>& pts1, const std::vector<cv::Point2f>& pts2)
 {
     assert(pts1.size() == pts2.size() && pts1.size() >= 2);
@@ -988,8 +938,14 @@ FOEResult ImageMatcher::computeFOE(const std::vector<cv::Point2f>& pts1, const s
     return {cv::Point2f(fx, fy), count > 0 ? (float)(residual / count) : 0.f};
 }
 
+// Estimates rotation directly from a homography (H = K*R*K_inv => R = K_inv*H*K),
+// re-orthogonalized via SVD since the raw decomposition is rarely a perfect rotation
+// matrix. Simpler/cheaper alternative to computeRotation()'s full decomposeHomographyMat
+// approach, but doesn't disambiguate between the homography's multiple valid rotation
+// solutions. Currently unused.
 cv::Mat ImageMatcher::solvePureRotation() {
-    
+
+
     // 1. Find the Homography matrix
     cv::Mat H = cv::findHomography(inputMatches, targetMatches, cv::RANSAC);
 
@@ -1006,16 +962,19 @@ cv::Mat ImageMatcher::solvePureRotation() {
     // Note: R might not be perfectly orthogonal due to noise
     // Using SVD to force it to be a valid rotation matrix:
     cv::SVD svd(R);
-    R = svd.u * svd.vt; 
+    R = svd.u * svd.vt;
 
-    // std::cout << "Rotation Matrix:\n" << R << std::endl;
     return R;
 }
 
 
+// Legacy variant of getAlignmentDirection() that takes point correspondences as
+// arguments instead of recomputing SIFT matches internally — same homography-vs-
+// essential-matrix logic (including the same permanently-disabled "&& 0" pure-
+// rotation branch), just parameterized differently. Not called anywhere in the
+// current codebase; kept for reference alongside getAlignmentDirection().
 std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlignmentOld( const std::vector<cv::Point2f> newInputMatches, const std::vector<cv::Point2f> newTargetMatches, bool rotationOnly){
-    
-    // std::cout <<"Matches, target: " << targetMatches.size() << ", input: " << inputMatches.size() << std::endl;
+
     cv::Mat rotationMatrix = cv::Mat::eye(3, 3, CV_32F);
     cv::Point3f world_direction = cv::Point3f(0,0,0);
     float meanError = std::numeric_limits<float>::infinity();
@@ -1058,14 +1017,7 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     // H = [ s*cosθ  -s*sinθ  tx ]
     //     [ s*sinθ   s*cosθ  ty ]
 
-    // double tx = H.at<double>(0,2);
-    // double ty = H.at<double>(1,2);
-    // meanError = std::sqrt(tx*tx + ty*ty);
-
-    // std::cout << "Estimated translation magnitude (mean error): " << meanError << std::endl;
-    
     if ( (!H.empty() && ((tau_H > 0.7) || rotationOnlyFlag)) && 0) {
-        // rotationMatrix = solvePureRotation();
         cv::Mat bestR = computeRotation(H, hInliers, maskH);
         cv::transpose(bestR, rotationMatrix);
     }
@@ -1073,7 +1025,6 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
 
         cv::Mat bestR, bestT, bestT64, inliersE;
         int inlierCount = cv::recoverPose(EssentialMat, newInputMatches, newTargetMatches, cameraMatrix, bestR, bestT64, inliersE);
-        // std::cout << " Recoverpose inliers " << inlierCount << std::endl;
         std::vector<cv::Point2f> inliers1, inliers2;
         for(int i = 0; i < inliersE.rows; i++) {
             if(inliersE.at<uchar>(i)) {
@@ -1081,31 +1032,18 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
                 inliers2.push_back(newTargetMatches[i]);
             }
         }
-        // std::cout << " Before ReprojectionError " << std::endl;
         meanError = getReprojectionError(inliers1, inliers2, bestR, bestT64);
-        // std::cout << " After ReprojectionError " << std::endl;
         flow = getOpticalFlow(inliers1, inliers2);
         float flow_norm = std::sqrt(flow.x*flow.x + flow.y*flow.y);
-        // error3d.x = flow.x;
-        // error3d.y = flow.y;
-        // error3d.z = 
         rotationMatrix = bestR.clone();
         cv::transpose(bestR, rotationMatrix);
         // bestT64.convertTo(bestT, CV_32F);
         cv::Mat bestT_ = - bestR.t() * bestT64;
         bestT_.convertTo(bestT, CV_32F);
-        // cv::Mat t_inv, t_inv64;
-        // t_inv = bestT * meanError;
-        // t_inv64 = -bestT64 * bestR.t() * meanError;
-        // t_inv64.convertTo(t_inv, CV_32F);
-        // world_direction = cv::Point3f(t_inv.at<float>(0,0), t_inv.at<float>(1,0), t_inv.at<float>(2,0));
         world_direction = cv::Point3f(bestT.at<float>(0,0)*flow_norm, bestT.at<float>(1,0)*flow_norm, bestT.at<float>(2,0)*flow_norm);
 
         if ((std::abs(bestT.at<float>(2,0)) > std::abs(bestT.at<float>(1,0)) + std::abs(bestT.at<float>(0,0))) && flow_norm < 10) world_direction.z *= 10;
         meanError = flow_norm;
-        // std::cout << "Estimated flow direction: " << flow << std::endl;
-        // std::cout << "Estimated translation matrix: " << std::endl << bestT << std::endl;
-        // std::cout << "world direction: " << world_direction << std::endl;
     }
     {
         std::ostringstream ss;
@@ -1116,9 +1054,37 @@ std::tuple<cv::Mat, cv::Point3f, cv::Point2f, float, bool> ImageMatcher::getAlig
     return {rotationMatrix, world_direction, flow, meanError, true};
 }
 
+// THE LIVE ENTRY POINT: this is the only ImageMatcher method main.cpp actually calls,
+// once per frame. High-level flow:
+//   1. Get point correspondences (inputMatches = current frame, targetMatches =
+//      target image) one of two ways:
+//        a) matchedPoints.newMatches (the common case): use the fresh SuperPoint/
+//           LightGlue matches read from shared memory this frame, converting each
+//           match's reported 2D covariance (packed as (xx, xy, yy) in cov.{x,y,z})
+//           into a proper 2x2 covariance matrix.
+//        b) matchedPoints.newMatches == false but a frame is available: the external
+//           Python matcher hasn't produced a new result yet, so fall back to Lucas-
+//           Kanade optical-flow tracking of the *previous* frame's matched points
+//           (targetMatches_) into the current frame (track_features()), and estimate
+//           per-point covariance from local image gradients instead
+//           (compute_point_covariances()). Either path bails out (returns
+//           success=false) if fewer than 9 usable correspondences survive.
+//   2. Convert every 2D match + its pixel covariance into a MatchData: unproject to
+//      a normalized 3D bearing vector via K_inv, and propagate the 2D covariance to
+//      3D via the unscented transform (see UnscentedTransform::propagate2DTo3D).
+//   3. Hand the batch of MatchData to the PNEC solver (RelativePoseEstimatorOld —
+//      see pnecOptimizer.hpp) to get the rotation R and translation direction t_dir.
+//      R and t_init/t_dir are member variables, so each call seeds the solver with
+//      the previous frame's result for faster convergence.
+//   4. Return the position-error magnitude as the median de-rotated parallax in
+//      pixels (see the end of this function); main.cpp scales t_dir by it. The
+//      Sampson pixel error is only logged, as a fit-quality diagnostic.
 std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const Matches& matchedPoints, const cv::Mat& frame){
 
-    pnec::RelativePoseEstimatorOld estimator(logger, K);
+    // pnec::RelativePoseEstimator estimator(logger, K);
+    const auto tAlignStart = std::chrono::steady_clock::now();
+    pnec::PNECEstimator estimator(logger, K, pnecOptions_);
+    flowFit_ = eccFit_ = TranslationFit{};   // stale fits must not survive an early return
 
     if(!matchedPoints.newMatches && !frame.empty()){
         TrackingResult trackingResult = track_features(frame, targetImageGray, targetMatches_);
@@ -1131,7 +1097,7 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
                 targetMatches.push_back(targetMatches_[i]);
             }
         }
-        else return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false}; 
+        else return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
         covariances = compute_point_covariances(frame, inputMatches, 5);
     }
     else{
@@ -1139,76 +1105,172 @@ std::tuple<cv::Mat, cv::Point3f, float, bool> ImageMatcher::getAlignment( const 
         targetMatches = matchedPoints.kpts1;
         targetMatches_ = matchedPoints.kpts1;
         if(matchedPoints.n > 8){
+            // covariances is a member: clear it, or match i keeps reading the first
+            // frame's covariance (push_back only ever appended).
+            covariances.clear();
             for(auto cov : matchedPoints.covariances){
                 cv::Matx22f H(cov.x, cov.y, cov.y, cov.z);
-            
-                // Inverse Hessian = 2D Covariance Matrix Sigma_2D
-                covariances.push_back(H.inv(cv::DECOMP_SVD));
+
+                // Python sends the structure tensor H (not its inverse); the single
+                // inversion here gives the 2D covariance Sigma_2D = H^-1.
+                covariances.push_back(identityCov_ ? cv::Matx22f::eye() : cv::Matx22f(H.inv(cv::DECOMP_SVD)));
             }
         }
         else return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
-        // covariances = matchedPoints.covariances;
     }
     std::vector<pnec::MatchData> matches;
     Eigen::Matrix3d K_inv = K.inverse();
     pnec::UnscentedTransform ut(logger);
 
-    // std::cout << "Camera Intrinsics K:\n" << K << std::endl;
-    // std::cout << "Camera Intrinsics K_inv:\n" << K_inv << std::endl;
     for (size_t i = 0; i < inputMatches.size(); i++) {
         pnec::MatchData m;
         Eigen::Vector3d h1(inputMatches[i].x, inputMatches[i].y, 1.0);
         Eigen::Vector3d h2(targetMatches[i].x, targetMatches[i].y, 1.0);
         m.bearing1 = (K_inv * h1).normalized();
         m.bearing2 = (K_inv * h2).normalized();
-        Eigen::Matrix2d cov2d; 
+        Eigen::Matrix2d cov2d;
         cov2d << covariances[i](0,0), covariances[i](0,1),
                 covariances[i](1,0), covariances[i](1,1);
-        m.cov3d = ut.propagate2DTo3D(cov2d, K);
+        m.cov3d = ut.propagate2DTo3D(cov2d, K, Eigen::Vector2d(inputMatches[i].x, inputMatches[i].y));
         matches.push_back(m);
-
-        // std::cout << "Match " << i << ": input(" << inputMatches[i].x << ", " << inputMatches[i].y 
-        //           << "), target(" << targetMatches[i].x << ", " << targetMatches[i].y 
-        //           << "), cov2d: [" << covariances[i](0,0) << ", " << covariances[i](0,1) 
-        //           << "; " << covariances[i](1,0) << ", " << covariances[i](1,1) 
-        //           << "]" << std::endl;
     }
-    
-    // cv::Mat Rf, tf, inliersE, maskE;
-    // if (t_init.isZero()) {
-    //     cv::Mat EssentialMat = cv::findEssentialMat(inputMatches, targetMatches, cameraMatrix, cv::RANSAC, 0.999, 2.0, 2000, maskE);
-    //     int inlierCount = cv::recoverPose(EssentialMat, inputMatches, targetMatches, cameraMatrix, Rf, tf, inliersE);
-    //     cv::Mat t64;
-    //     tf.convertTo(t64, CV_64F);
-    //     t_init = Eigen::Vector3d(t64.at<double>(0), t64.at<double>(1), t64.at<double>(2));
-    // }
-    
-    double totalError_ = 0.0d;
-    // R = cv::matToMatrix3d(Rf);
-    
-    estimator.estimate(matches, R, t_dir, t_init, totalError_);
 
-    // To get cam1_to_cam2:
-    Eigen::Matrix3d R_12 = R.transpose();
-    Eigen::Vector3d t_12 = -R_12 * t_dir;  
+    // Covariance-scale diagnostic: per-match RMS pixel std sqrt(trace(Sigma_2D)/2),
+    // logged as p10/median/p90 per frame, to pick a global scale factor for Sigma_2D
+    // (H^-1 from raw intensity gradients is not in px^2 of matching noise).
+    {
+        std::vector<double> stdPx;
+        stdPx.reserve(covariances.size());
+        for (size_t i = 0; i < inputMatches.size() && i < covariances.size(); i++) {
+            stdPx.push_back(std::sqrt(0.5 * (covariances[i](0,0) + covariances[i](1,1))));
+        }
+        if (!stdPx.empty()) {
+            std::sort(stdPx.begin(), stdPx.end());
+            auto at = [&](double q) { return stdPx[static_cast<size_t>(q * (stdPx.size() - 1))]; };
+            std::ostringstream ss;
+            ss << "covStdPx (" << (matchedPoints.newMatches ? "python" : "LK")
+               << ", n=" << stdPx.size() << "): p10=" << at(0.1)
+               << " median=" << at(0.5) << " p90=" << at(0.9);
+            logger.log("ImageMatcher", ss.str());
+        }
+    }
+
+    double totalError_ = 0.0d;
+    const auto tBuilt = std::chrono::steady_clock::now();
+
+    estimator.estimate(matches, R, t_dir, t_init, totalError_);
+    const auto tEstimated = std::chrono::steady_clock::now();
+    lastNoisePx_ = static_cast<float>(estimator.lastNoisePx());
+
+    // No rotation estimate this frame (e.g. no essential matrix near the goal, where the
+    // baseline is short): report the frame as failed instead of reusing the previous R,
+    // which is stale once the gimbal has moved and would also corrupt the de-rotation
+    // of the translation error. main.cpp sends zero commands for a failed frame.
+    ++estimateCalls_;
+    if (!estimator.lastSucceeded()) {
+        ++estimateFailures_;
+        std::ostringstream ss;
+        ss << "estimator failed (" << estimator.lastFailure() << "), frame skipped; failures "
+           << estimateFailures_ << "/" << estimateCalls_;
+        logger.log("ImageMatcher", ss.str());
+        return {cv::Mat::eye(3, 3, CV_64F), cv::Point3f(0, 0, 0), std::numeric_limits<float>::max(), false};
+    }
+
+    // Sign memory: the cheirality vote decides the sign of t from scratch every frame,
+    // and with distant points it can sit near 50/50, flipping t frame to frame (the
+    // drone then dithers). Only let the sign change against the previous direction
+    // when the vote is decisive; otherwise keep the previous sign.
+    constexpr double kDecisiveVote = 0.7;
+    if (t_dir.norm() > 1e-8) {
+        const double margin = estimator.lastVoteMargin();
+        if (lastValidT_.norm() > 1e-8 && t_dir.dot(lastValidT_) < 0 && margin < kDecisiveVote) {
+            t_dir = -t_dir;
+            std::ostringstream ss;
+            ss << "t sign kept from previous frame (cheirality vote " << margin << ")";
+            logger.log("ImageMatcher", ss.str());
+        }
+        lastValidT_ = t_dir;
+    }
     t_init = t_dir;
     cv::Mat R_cv;
     cv::Point3f t_cv;
     R_cv = matrix3dToMat(R);
     t_cv = cv::Point3f(t_dir.x(), t_dir.y(), t_dir.z());
 
-    cv::Mat t_mat = cv::Mat(t_cv);
-    float totalError;
-    // if (cv::norm(t_cv) < 1e-6) totalError = 0;
-    // else 
-    totalError = ImageMatcher::getSampsonPixelError(inputMatches,targetMatches, R_cv, t_mat);
-    if (totalError < 1) totalError *= 100;
+    // Position-error magnitude: median de-rotated parallax in pixels, i.e. the angle
+    // between each current bearing and the rotation-compensated target bearing
+    // (R * bearing2), times fx. Unlike the Sampson error (a fit residual that sits at
+    // the noise floor for any baseline), it grows with baseline/depth and drops to the
+    // matching-noise floor (~1-2 px) at the target. Same measure as parallax_px in
+    // pnecOptimizer.hpp's solveTranslation(). An inaccurate R inflates it.
+    std::vector<double> parallax;
+    parallax.reserve(matches.size());
+    for (const auto& m : matches) {
+        const Eigen::Vector3d Rb2 = R * m.bearing2;
+        parallax.push_back(std::atan2(m.bearing1.cross(Rb2).norm(), m.bearing1.dot(Rb2)));
+    }
+    auto mid = parallax.begin() + parallax.size() / 2;
+    std::nth_element(parallax.begin(), mid, parallax.end());
+    const float totalError = static_cast<float>(*mid * K(0, 0));
 
+    // Sampson error kept as a fit-quality diagnostic only (NaN when t_dir is zero).
+    cv::Mat t_mat = cv::Mat(t_cv);
+    const float sampsonPx = ImageMatcher::getSampsonPixelError(inputMatches, targetMatches, R_cv, t_mat);
+    {
+        std::ostringstream ss;
+        ss << "parallaxPx: " << totalError << " sampsonPx: " << sampsonPx;
+        logger.log("ImageMatcher", ss.str());
+    }
+
+    // Image-based translation error (options 1 and 2), logged every frame so the
+    // sources can be compared offline; main.cpp picks which one drives the gate.
+    flowFit_ = fitFlow(R);
+    eccFit_ = eccEnabled_ ? fitEcc(R, frame) : TranslationFit{};
+    {
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        ss.precision(3);
+        const cv::Point3f fe = flowFit_.errorPx(), ee = eccFit_.errorPx();
+        ss << "translationFit match_id=" << matchedPoints.matchId
+           << " flow valid=" << flowFit_.valid << " err=" << fe.x << "," << fe.y << "," << fe.z
+           << " sigma=" << flowFit_.sigmaPx << " z=" << flowFit_.z << " inliers=" << flowFit_.quality
+           << " n=" << flowFit_.n << " ms=" << flowFit_.ms
+           << " | ecc valid=" << eccFit_.valid << " err=" << ee.x << "," << ee.y << "," << ee.z
+           << " cc=" << eccFit_.quality << " ms=" << eccFit_.ms;
+        logger.log("ImageMatcher", ss.str());
+    }
+
+    {
+        using ms = std::chrono::duration<double, std::milli>;
+        const auto tEnd = std::chrono::steady_clock::now();
+        const auto& pt = estimator.lastTimings();
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        ss.precision(1);
+        ss << "timing build_ms=" << ms(tBuilt - tAlignStart).count()
+           << " pnec_ms=" << ms(tEstimated - tBuilt).count()
+           << " (init=" << pt.initMs << " nec=" << pt.necMs << " weighted=" << pt.weightedMs
+           << " joint=" << pt.jointMs << " guards=" << pt.guardsMs << ")"
+           << " post_ms=" << ms(tEnd - tEstimated).count()
+           << " total_ms=" << ms(tEnd - tAlignStart).count();
+        logger.log("ImageMatcher", ss.str());
+    }
     return {R_cv, t_cv, totalError, true};
 }
 
+// Lucas-Kanade optical-flow fallback used when the external SuperPoint/LightGlue
+// matcher hasn't produced a new match set for this frame (see getAlignment(), which
+// calls this as track_features(currentFrame, targetImageGray, targetMatches_)).
+// NOTE the (img_prev, img_next) parameter names are misleading for that call site:
+// pts_next are the previously-matched points in the *target* image (img_next), and
+// this tracks them into img_prev (the *current* frame) — result.tracked_pts ends up
+// holding their estimated positions in img_prev/the current frame, which is what
+// getAlignment() uses as the new inputMatches. It then tracks those estimated points
+// back into img_next and drops any point whose round-trip distance from its original
+// pts_next position exceeds max_bidirectional_error, to reject points that drifted
+// onto the wrong feature.
 TrackingResult ImageMatcher::track_features(const cv::Mat& img_prev, const cv::Mat& img_next,
-                                           const std::vector<cv::Point2f>& pts_next, 
+                                           const std::vector<cv::Point2f>& pts_next,
                                            float max_bidirectional_error)
 {
     TrackingResult result;
@@ -1283,9 +1345,14 @@ TrackingResult ImageMatcher::track_features(const cv::Mat& img_prev, const cv::M
 }
 
 /**
- * @brief Computes the 2x2 inverse Hessian (covariance matrix) for each tracked keypoint.
+ * @brief Computes the 2x2 inverse Hessian (covariance matrix) for each tracked keypoint,
+ * from the local structure tensor of image gradients in a window_size x window_size
+ * patch around it (a flat/low-texture patch -> a near-singular Hessian -> a large,
+ * unreliable covariance). Used by getAlignment() in the optical-flow fallback path,
+ * as a substitute for the per-match covariances SuperPoint/LightGlue would otherwise
+ * report.
  */
-std::vector<cv::Matx22f> ImageMatcher::compute_point_covariances(const cv::Mat& img_gray, 
+std::vector<cv::Matx22f> ImageMatcher::compute_point_covariances(const cv::Mat& img_gray,
                                 const std::vector<cv::Point2f>& points, int window_size) 
 {
     std::vector<cv::Matx22f> covariances(points.size());
@@ -1326,9 +1393,12 @@ std::vector<cv::Matx22f> ImageMatcher::compute_point_covariances(const cv::Mat& 
 }
 
 
+// Mean Sampson distance (pixels) between pts1/pts2 under the fundamental matrix
+// F = K^-T * [t]_x * R * K^-1. This is what getAlignment() uses as its returned
+// confidence/quality metric (see the totalError output).
 float ImageMatcher::getSampsonPixelError(const std::vector<cv::Point2f>& pts1,
                                          const std::vector<cv::Point2f>& pts2,
-                                         const cv::Mat& R_in, const cv::Mat& t_in) 
+                                         const cv::Mat& R_in, const cv::Mat& t_in)
 {
     if (pts1.empty() || pts1.size() != pts2.size()) return 0.0f;
 
@@ -1391,6 +1461,10 @@ float ImageMatcher::getSampsonPixelError(const std::vector<cv::Point2f>& pts1,
     return static_cast<float>(totalError / validCount); 
 }
 
+// Alternative to getSampsonPixelError(): mean symmetric epipolar distance (sum of the
+// point-to-line distance in each image, rather than the first-order Sampson
+// approximation) under the fundamental matrix built from (Rf, tf). Not currently
+// called by the live pipeline.
 float ImageMatcher::getSymmetricEpipolarDistance(const std::vector<cv::Point2f>& pts1,
                                                  const std::vector<cv::Point2f>& pts2,
                                                  const cv::Mat& Rf, const cv::Mat& tf)
@@ -1462,4 +1536,126 @@ float ImageMatcher::getSymmetricEpipolarDistance(const std::vector<cv::Point2f>&
 
     // Returns average distance in pixels (e.g. 0.75 px)
     return static_cast<float>(total_distance / valid_count);
+}
+
+// Option 1: robust least-squares fit of the de-rotated match displacements
+// d_i = p_cur_i - pi(K R K^-1 p_tgt_i) with d_i = tau + s * (p_cur_i - c).
+// The expansion is solved as s' = s * r (px at radius r) for conditioning. Huber IRLS
+// keeps bad matches from pulling the fit; the covariance gives sigma and z.
+TranslationFit ImageMatcher::fitFlow(const Eigen::Matrix3d& Rm) const {
+    TranslationFit f;
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t N = std::min(inputMatches.size(), targetMatches.size());
+    if (N < 8) return f;
+    const Eigen::Matrix3d H = K * Rm * K.inverse();
+    const Eigen::Vector2d c(K(0, 2), K(1, 2));
+    // Fixed reference radius, shared with the ECC fit so both report s*r in the same px.
+    const double r = 0.5 * c.norm();
+    std::vector<Eigen::Vector2d> q, d;
+    q.reserve(N);
+    d.reserve(N);
+    for (size_t i = 0; i < N; ++i) {
+        const Eigen::Vector3d p = H * Eigen::Vector3d(targetMatches[i].x, targetMatches[i].y, 1.0);
+        if (p.z() <= 1e-9) continue;
+        const Eigen::Vector2d cur(inputMatches[i].x, inputMatches[i].y);
+        d.push_back(cur - p.head<2>() / p.z());
+        q.push_back((cur - c) / r);
+    }
+    const size_t M = d.size();
+    if (M < 8) return f;
+
+    constexpr double kHuber = 1.5;   // in units of the robust residual sigma
+    Eigen::Vector3d x = Eigen::Vector3d::Zero();   // tau_x, tau_y, s' (px)
+    std::vector<double> w(M, 1.0), res(M);
+    double sigma = 1.0;
+    Eigen::Matrix3d AtA;
+    for (int it = 0; it < 6; ++it) {
+        AtA.setZero();
+        Eigen::Vector3d Atb = Eigen::Vector3d::Zero();
+        for (size_t i = 0; i < M; ++i) {
+            const Eigen::Vector3d ax(1, 0, q[i].x()), ay(0, 1, q[i].y());
+            AtA += w[i] * (ax * ax.transpose() + ay * ay.transpose());
+            Atb += w[i] * (ax * d[i].x() + ay * d[i].y());
+        }
+        x = AtA.ldlt().solve(Atb);
+        for (size_t i = 0; i < M; ++i)
+            res[i] = (d[i] - x.head<2>() - x.z() * q[i]).norm();
+        std::vector<double> sorted = res;
+        std::nth_element(sorted.begin(), sorted.begin() + M / 2, sorted.end());
+        // Median of a 2D residual length is 1.1774 * per-axis sigma (Rayleigh).
+        sigma = std::max(sorted[M / 2] / 1.1774, 1e-3);
+        for (size_t i = 0; i < M; ++i)
+            w[i] = res[i] <= kHuber * sigma ? 1.0 : kHuber * sigma / res[i];
+    }
+    if (!x.allFinite()) return f;
+    // Error vector e = (tau_x, tau_y, -s') and its covariance sigma^2 (A^T W A)^-1.
+    Eigen::Matrix3d C = sigma * sigma * AtA.inverse();
+    Eigen::Vector3d e(x.x(), x.y(), -x.z());
+    Eigen::Matrix3d J = Eigen::Vector3d(1, 1, -1).asDiagonal();
+    C = J * C * J.transpose();
+    f.valid = C.allFinite();
+    f.tauX = static_cast<float>(x.x());
+    f.tauY = static_cast<float>(x.y());
+    f.rPx = static_cast<float>(r);
+    f.s = static_cast<float>(x.z() / r);
+    f.sigmaPx = static_cast<float>(std::sqrt(C.trace()));
+    f.z = static_cast<float>(std::sqrt(std::max(0.0, e.dot(C.ldlt().solve(e)))));
+    f.quality = std::count_if(w.begin(), w.end(), [](double v) { return v >= 1.0; }) / double(M);
+    f.n = static_cast<int>(M);
+    f.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return f;
+}
+
+// Option 2: dense ECC (affine) between the target warped by the estimated rotation
+// (K R K^-1, so only translation effects remain) and the current frame, at 1/3
+// resolution. ECC's warp W maps template (de-rotated target) pixels to frame pixels,
+// so W(x) - x is the same displacement field as in fitFlow; its value at the principal
+// point is tau and half the trace of (A - I) is s. Only valid near the target, where
+// the images already overlap closely (ECC starts from the identity).
+TranslationFit ImageMatcher::fitEcc(const Eigen::Matrix3d& Rm, const cv::Mat& frame) {
+    TranslationFit f;
+    if (frame.empty() || targetImageGray.empty()) return f;
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr double kEccScale = 1.0 / 3.0;
+    if (targetSmall_.empty())
+        cv::resize(targetImageGray, targetSmall_, cv::Size(), kEccScale, kEccScale, cv::INTER_AREA);
+    cv::Mat gray, cur;
+    if (frame.channels() == 3) cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    else gray = frame;
+    cv::resize(gray, cur, targetSmall_.size(), 0, 0, cv::INTER_AREA);
+
+    // K is in full-resolution (target image) pixels.
+    const double sc = static_cast<double>(targetSmall_.cols) / targetImageGray.cols;
+    Eigen::Matrix3d S = Eigen::Matrix3d::Identity();
+    S(0, 0) = S(1, 1) = sc;
+    const Eigen::Matrix3d Hs = S * K * Rm * K.inverse() * S.inverse();
+    cv::Mat Hcv(3, 3, CV_64F);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) Hcv.at<double>(i, j) = Hs(i, j);
+    cv::Mat tmpl, mask;
+    cv::warpPerspective(targetSmall_, tmpl, Hcv, cur.size(), cv::INTER_LINEAR);
+    cv::warpPerspective(cv::Mat(targetSmall_.size(), CV_8U, cv::Scalar(255)), mask, Hcv,
+                        cur.size(), cv::INTER_NEAREST);
+    cv::erode(mask, mask, cv::Mat(), cv::Point(-1, -1), 3);   // drop interpolated borders
+
+    cv::Mat W = cv::Mat::eye(2, 3, CV_32F);
+    double cc = 0;
+    try {
+        cc = cv::findTransformECCWithMask(tmpl, cur, mask, cv::noArray(), W, cv::MOTION_AFFINE,
+                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 50, 1e-5), 5);
+    } catch (const cv::Exception&) {
+        return f;   // did not converge
+    }
+    const double a00 = W.at<float>(0, 0) - 1, a01 = W.at<float>(0, 1), b0 = W.at<float>(0, 2);
+    const double a10 = W.at<float>(1, 0), a11 = W.at<float>(1, 1) - 1, b1 = W.at<float>(1, 2);
+    const double cxs = K(0, 2) * sc, cys = K(1, 2) * sc;
+    const double r = 0.5 * std::hypot(K(0, 2), K(1, 2));
+    f.tauX = static_cast<float>((a00 * cxs + a01 * cys + b0) / sc);
+    f.tauY = static_cast<float>((a10 * cxs + a11 * cys + b1) / sc);
+    f.s = static_cast<float>(0.5 * (a00 + a11));
+    f.rPx = static_cast<float>(r);
+    f.quality = cc;
+    f.valid = std::isfinite(f.tauX) && std::isfinite(f.tauY) && std::isfinite(f.s);
+    f.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return f;
 }

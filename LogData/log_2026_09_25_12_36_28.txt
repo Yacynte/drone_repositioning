@@ -1,0 +1,212 @@
+[main] [mode] stream
+[main] [net] cmd=0.0.0.0:9020 msg=0.0.0.0:9010
+[MetadataClient] UDP receiver ready on 0.0.0.0:9020
+[main] Camera/Stream opened
+[RtspReader] Connecting to 172.25.0.1:9000
+[RtspReader] Successfully connected to server at 172.25.0.1:9000
+[RtspReader] [SHM Writer] Single frame memory ready at /single_frame_shm
+[main] Unreal test: 1
+[RtspReader] Starting TCP reader loop for IP: 172.25.0.1, Port: 9000
+[MetadataClient] Received command to start repositioning
+[main] Launched Python process for matches with target image: /home/user/drone_repositioning/target_sim/GT5_Capture_20260911_134539.png
+[main] Matches reader initialized with shared memory: /sp_sg_matches
+[ImageMatcher] Target image size: 1920x1080
+[main] Image matcher initialized with target image: /home/user/drone_repositioning/target_sim/GT5_Capture_20260911_134539.png
+[SPSGReader] Number of matches obtained: 63
+[pnec] [pnec] eigenvalues: 3.24505e-06 3.61585e-05 9.74099e-05
+[main] rotation: x=2.03919 y=9.47361 z=17.272
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,2.20584,3.49054,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 64
+[pnec] [pnec] eigenvalues: 4.64767e-06 4.59697e-05 0.000115304
+[main] rotation: x=2.00218 y=9.41029 z=17.249
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,2.19307,3.48759,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 65
+[pnec] [pnec] eigenvalues: 3.62733e-06 3.65355e-05  9.7657e-05
+[main] rotation: x=2.07845 y=9.51063 z=17.1395
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,2.21329,3.47348,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 72
+[pnec] [pnec] eigenvalues: 2.36716e-06  1.3379e-05 8.05702e-05
+[main] rotation: x=1.99433 y=8.53125 z=15.1422
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,2.01222,3.19685,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 88
+[pnec] [pnec] eigenvalues:  1.7779e-06 1.09746e-05  5.4533e-05
+[main] rotation: x=1.45365 y=7.18284 z=13.1678
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,1.72229,2.88646,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 81
+[pnec] [pnec] eigenvalues: 1.27508e-06  1.0616e-05 3.61947e-05
+[main] rotation: x=1.21947 y=6.14925 z=11.3884
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,1.49064,2.57466,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 80
+[pnec] [pnec] eigenvalues: 1.13394e-06 4.56037e-06 3.09421e-05
+[main] rotation: x=0.951236 y=5.41472 z=10.3699
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,1.32155,2.3827,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 80
+[pnec] [pnec] eigenvalues: 5.80666e-07  4.1551e-06 1.25455e-05
+[main] rotation: x=0.649063 y=4.52814 z=8.89845
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,1.11308,2.08858,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 84
+[pnec] [pnec] eigenvalues: 4.87882e-07 2.43952e-06  8.8787e-06
+[main] rotation: x=0.623051 y=3.81177 z=7.53584
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.941569,1.79959,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 95
+[pnec] [pnec] eigenvalues: 3.49867e-07 2.93067e-06 5.74542e-06
+[main] rotation: x=0.323303 y=3.32339 z=6.81892
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.823283,1.64161,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 91
+[pnec] [pnec] eigenvalues: 3.42384e-07 2.16677e-06 5.07827e-06
+[main] rotation: x=0.245179 y=2.87009 z=5.89996
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.712637,1.43364,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 96
+[pnec] [pnec] eigenvalues: 3.08921e-07  1.6963e-06 4.71679e-06
+[main] rotation: x=0.177831 y=2.50384 z=5.17396
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.622709,1.26539,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 98
+[pnec] [pnec] eigenvalues: 2.04468e-07 1.35975e-06 2.90149e-06
+[main] rotation: x=0.223827 y=2.18849 z=4.40403
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.544949,1.08355,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 102
+[pnec] [pnec] eigenvalues: 3.26489e-07 1.81142e-06 3.78503e-06
+[main] rotation: x=0.0485685 y=1.84535 z=3.90488
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.460034,0.964001,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 106
+[pnec] [pnec] eigenvalues: 1.95766e-07   1.184e-06  2.1869e-06
+[main] rotation: x=0.0508748 y=1.58542 z=3.25137
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.395527,0.805756,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 103
+[pnec] [pnec] eigenvalues: 1.94267e-07 1.29239e-06 2.50836e-06
+[main] rotation: x=0.0297233 y=1.39462 z=2.88671
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.348091,0.716708,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 102
+[pnec] [pnec] eigenvalues: 2.77384e-07  1.8958e-06 3.96762e-06
+[main] rotation: x=-0.0286631 y=1.22621 z=2.54615
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.30617,0.633121,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 92
+[pnec] [pnec] eigenvalues: 2.75855e-07 2.05496e-06 7.81913e-06
+[main] rotation: x=-0.0440698 y=1.03389 z=2.19506
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0.258242,0.546572,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 93
+[pnec] [pnec] eigenvalues: 4.27942e-07 3.22814e-06  9.8246e-06
+[main] rotation: x=-0.118004 y=0.88947 z=1.97829
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0.492966,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 85
+[pnec] [pnec] eigenvalues: 5.88693e-07 3.06377e-06 1.48714e-05
+[main] rotation: x=-0.0825368 y=0.762435 z=1.5318
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0.382203,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 86
+[pnec] [pnec] eigenvalues: 5.81614e-07 3.22444e-06 1.39437e-05
+[main] rotation: x=-0.0709479 y=0.722076 z=1.25686
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0.313802,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 83
+[pnec] [pnec] eigenvalues: 8.91234e-07 4.53257e-06  2.1513e-05
+[main] rotation: x=-0.142993 y=0.647978 z=1.13216
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0.282739,0,0,0,0
+
+[SPSGReader] Number of matches obtained: 78
+[pnec] [pnec] eigenvalues:  1.0842e-06 8.28682e-06 2.14418e-05
+[main] rotation: x=-0.12735 y=0.598222 z=0.822977
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[main] Arrived at target
+[SPSGReader] Number of matches obtained: 74
+[pnec] [pnec] eigenvalues: 1.55744e-06 6.67388e-06 3.22709e-05
+[main] rotation: x=-0.156846 y=0.54915 z=0.77827
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[main] Arrived at target
+[SPSGReader] Number of matches obtained: 74
+[pnec] [pnec] eigenvalues: 1.85927e-06 1.15453e-05   4.368e-05
+[main] rotation: x=-0.143338 y=0.588845 z=0.398465
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[main] Arrived at target
+[SPSGReader] Number of matches obtained: 76
+[pnec] [pnec] eigenvalues: 1.94064e-06 1.09933e-05 7.24148e-05
+[main] rotation: x=-0.0105546 y=0.555532 z=0.173055
+[main] translation: x=0 y=0 z=-0
+[main] transError: 0
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,0
+
+[main] Arrived at target
+[main] Maintained target position for 2 seconds, stopping repositioning
+[MetadataClient] Sent metadata: 0,0,0,0,0,0,-1
+
+[MetadataClient] Received command to stop repositioning

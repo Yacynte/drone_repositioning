@@ -6,6 +6,10 @@
 // Detects when a drone has reached its target by identifying oscillation
 // in the translation vector (reprojection_scale * recoverPose direction).
 //
+// Currently unused: it was only called from a superseded version of
+// MetadataTcpClient::respositionFunc (see the git history for MetadataClient.cpp).
+// Kept as a candidate building block if oscillation-based stop detection is revisited.
+//
 // Strategy:
 //   1. Compute finite difference over k frames for noise robustness
 //   2. Extract sign of each axis delta
@@ -36,7 +40,6 @@ public:
     // Returns true when oscillation is detected (stop condition met).
     std::tuple<bool, bool, bool> update(const cv::Point3f& translation) {
         history_.push_back(translation);
-        // history_.push_back(cv::norm(translation)); // consider magnitude only to detect oscillation regardless of direction
         // Need at least k+1 samples to compute one delta,
         // and window+1 deltas to evaluate crossings.
         const int required = cfg_.k + cfg_.window;
@@ -50,7 +53,6 @@ public:
 
         // Build recent finite differences over stride k
         // delta[i] = history[i + k] - history[i]
-        // std::vector<float> deltas;
         std::vector<cv::Point3f> deltas;
         deltas.reserve(cfg_.window);
 
@@ -58,8 +60,6 @@ public:
         for (int i = start; i < start + cfg_.window; ++i) {
             deltas.push_back(history_[i + cfg_.k] - history_[i]);
         }
-
-        // return hasPermanentSignChange(deltas.data(), cfg_.window);
 
         // Count only negative-to-positive crossings per axis.
         // +ve to -ve = error still dropping (drone approaching) -> ignore
@@ -91,16 +91,14 @@ public:
 
     void reset() { history_.clear(); }
 
-    // Expose for debugging / visualization
-    // const std::vector<float>& history() const { return history_; }
-
 private:
     StopDetectorConfig        cfg_;
-    std::vector<float>  history__;
     std::vector<cv::Point3f>  history_;
 
+    // Alternative single-axis oscillation detector (looks for a mostly-negative-delta
+    // run followed by a mostly-flat/positive run). Not currently called by update();
+    // kept as an alternative strategy to count_crossings() above.
     bool hasPermanentSignChange(const float* deltas, int size, float zeroThreshold = 0.1f, float threshold = 0.8f) {
-        // bool hasDirectionalShift(const float* deltas, int size, float zeroThreshold = 0.1f) {
         if (size < 4) return false;
 
         // 1. Map raw deltas to discrete direction states: -1, 0, or 1

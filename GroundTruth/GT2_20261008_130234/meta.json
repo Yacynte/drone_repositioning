@@ -1,0 +1,19 @@
+{
+  "tag": "GT",
+  "motion_index": "2",
+  "frame": 3725,
+  "width": 1920, "height": 1080,
+  "fov_deg": 90.0000000000, "fov_axis": "horizontal",
+  "fx": 960.0000000000, "fy": 960.0000000000, "cx": 960.0000000000, "cy": 540.0000000000,
+  "pixel_centre_offset": 0.5,
+  "cam_location_cm": [356548.0000000000, -178343.0000000000, -178005.0000000000],
+  "cam_quat_xyzw": [-0.022557566113, 0.084185982829, 0.257834160496, 0.962250186899],
+  "cam_forward": [0.852868531952, 0.492403876506, -0.173648177667],
+  "cam_right": [-0.500000000000, 0.866025403784, -0.000000000000],
+  "cam_up": [0.150383733180, 0.086824088833, 0.984807753012],
+  "world_frame": "UE world, left-handed, X fwd / Y right / Z up, cm",
+  "camera_frame": "UE camera, X forward / Y right / Z up",
+  "depth": "depth_planar_cm.f32, float32 HxW, planar depth along X (cm), NaN = invalid",
+  "world_xyz": "world_xyz_cm.f64, float64 HxWx3, UE world position (cm), NaN = invalid",
+  "layout": "row-major, row 0 = top of image, little-endian"
+}

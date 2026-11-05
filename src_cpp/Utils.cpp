@@ -1,5 +1,8 @@
 #include "Utils.h"
-// #include "AlgoLogger.hpp"
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/wait.h>
 
 bool hasNaN(const cv::Point3f& p) {
     return std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z);
@@ -8,19 +11,83 @@ bool hasNaN(const cv::Point3f& p) {
 
 void launch_python(const std::string& target) {
     std::string cmd = "python3 src/matches.py"
-                    //   " --camera " + camera +
                       " --target " + target + " &";  // & = background
     std::system(cmd.c_str());
 }
 
-void launch_python_posix(const std::string& onnx_matches, const std::string& target) {
+PythonProcess launch_python_posix(const std::string& onnx_matches, const std::string& target,
+                                  Logger& logger, const std::vector<std::string>& extraArgs) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        logger.log("main", "error: pipe() failed, starting Python without output logging");
+        fds[0] = fds[1] = -1;
+    }
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process
-        execlp("python3", "python3", onnx_matches.c_str() , "--target", target.c_str(), nullptr);
-        _exit(1); // Exits child if exec fails
+        // Child: stdout + stderr into the pipe, unbuffered so lines arrive as printed.
+        if (fds[1] != -1) {
+            dup2(fds[1], STDOUT_FILENO);
+            dup2(fds[1], STDERR_FILENO);
+            close(fds[0]);
+            close(fds[1]);
+        }
+        setenv("PYTHONUNBUFFERED", "1", 1);
+        std::vector<std::string> args = {"python3", "-u", onnx_matches, "--target", target};
+        args.insert(args.end(), extraArgs.begin(), extraArgs.end());
+        std::vector<char*> argv;
+        for (auto& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        execvp("python3", argv.data());
+        _exit(127); // exec failed
     }
-    // Parent C++ code continues immediately
+    if (pid < 0) {
+        logger.log("main", "error: fork() failed, Python matcher not started");
+        if (fds[0] != -1) { close(fds[0]); close(fds[1]); }
+        return PythonProcess();
+    }
+    // Parent continues immediately; a thread forwards Python's output line by line.
+    std::thread reader;
+    if (fds[0] != -1) {
+        close(fds[1]);
+        reader = std::thread([fd = fds[0], &logger]() {
+            FILE* f = fdopen(fd, "r");
+            if (!f) { close(fd); return; }
+            char* line = nullptr;
+            size_t cap = 0;
+            ssize_t n;
+            while ((n = getline(&line, &cap, f)) != -1) {
+                std::string s(line, static_cast<size_t>(n));
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                if (!s.empty()) logger.log("python", s);
+            }
+            free(line);
+            fclose(f);   // EOF: Python exited (or closed its output)
+        });
+    }
+    return PythonProcess(pid, std::move(reader), &logger);
+}
+
+void PythonProcess::stop(double timeoutSec) {
+    if (pid_ > 0) {
+        int status = 0;
+        pid_t r = 0;
+        const int steps = static_cast<int>(timeoutSec * 20);
+        for (int i = 0; i < steps && (r = waitpid(pid_, &status, WNOHANG)) == 0; ++i)
+            usleep(50 * 1000);
+        if (r == 0) {
+            if (logger_) logger_->log("main", "Python did not exit in time, sending SIGTERM");
+            kill(pid_, SIGTERM);
+            r = waitpid(pid_, &status, 0);
+        }
+        if (logger_ && r == pid_) {
+            std::ostringstream ss;
+            if (WIFEXITED(status)) ss << "Python exited with code " << WEXITSTATUS(status);
+            else if (WIFSIGNALED(status)) ss << "Python killed by signal " << WTERMSIG(status);
+            logger_->log("main", ss.str());
+        }
+        pid_ = -1;
+    }
+    if (reader_.joinable()) reader_.join();
 }
 
 cv::Mat vector3dToMat(const Eigen::Vector3d& v) {
@@ -38,8 +105,6 @@ cv::Mat matrix3dToMat(const Eigen::Matrix3d& R) {
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++)
             m.at<double>(i, j) = R(i, j);
-    // cv::Mat m_float;
-    // m.convertTo(m_float, CV_32F);
     return m;
 }
 
@@ -56,7 +121,6 @@ Eigen::Matrix3d matToMatrix3d(const cv::Mat& R) {
 cv::Point3f activation(cv::Point3f x, float k , std::string function ) {
     if (function == "sigmoid") {
         cv::Point3f sig;
-        // float k = 1.0f;  // increase → steeper (toward tanh), decrease → gentler
         sig.x = 2.0f / (1.0f + std::exp(-k * x.x)) - 1.0f;
         sig.y = 2.0f / (1.0f + std::exp(-k * x.y)) - 1.0f;
         sig.z = 2.0f / (1.0f + std::exp(-k * x.z)) - 1.0f;
@@ -76,7 +140,7 @@ cv::Point3f activation(cv::Point3f x, float k , std::string function ) {
             1.0f - std::exp(-x.z)
         );
     }
-    return x; // cv::Point3f(0, 0, 0); // fallback
+    return x; // fallback
 }
 
 
@@ -86,6 +150,15 @@ cv::Point3f ConvertCVToUE(const cv::Point3f& p)
         p.z,      // forward
         p.x,      // right
         -p.y      // up
+    );
+}
+
+cv::Point3f ConvertCVToPX4(const cv::Point3f& p)
+{
+    return cv::Point3f(
+        p.z,      // forward
+        p.x,      // right
+        p.y       // down (no negation: CV's y-down already matches PX4's z-down)
     );
 }
 
@@ -147,9 +220,7 @@ cv::Point3f rotmatToYPRDeg_XYZ(const cv::Mat& R)
     }
 
     const double rad2deg = 180.0 / CV_PI;
-    // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
     return cv::Point3f((float)(roll * rad2deg), (float)(pitch * rad2deg), (float)(yaw * rad2deg));
-    // return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
 }
 
 cv::Point3f rotmatToRPYDeg_XYZ(const cv::Mat& R)
@@ -186,22 +257,11 @@ cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
 {
     CV_Assert(R.rows == 3 && R.cols == 3);
 
-    // cv::Mat Q, R;
-    // cv::RQDecomposition(rotationMatrix, Q, R); // R is now a clean rotation matrix
-    // Now extract angles from R
-
     const float r00 = R.at<float>(0,0), r01 = R.at<float>(0,1), r02 = R.at<float>(0,2);
     const float r10 = R.at<float>(1,0), r11 = R.at<float>(1,1), r12 = R.at<float>(1,2);
     const float r20 = R.at<float>(2,0), r21 = R.at<float>(2,1), r22 = R.at<float>(2,2);
 
     float roll, pitch, yaw;
-
-    // Ensure the values are sane before computing
-    // float val = std::pow(r21, 2) + std::pow(r22, 2);
-    // // Ensure we don't sqrt a negative number
-    // float sqrt_val = std::sqrt(std::max(0.0f, val));
-
-    // pitch = std::atan2(-r20, sqrt_val);
 
     pitch = std::asin(std::clamp(-r20, -1.0f, 1.0f));
 
@@ -219,9 +279,7 @@ cv::Point3f rotmatToYPRDeg_ZYX(const cv::Mat& R)
     }
 
     const float rad2deg = 180.0 / CV_PI;
-    // return { yaw * rad2deg, pitch * rad2deg, roll * rad2deg };
     return cv::Point3f(roll * rad2deg, pitch * rad2deg, yaw * rad2deg);
-    // return cv::Point3f((float)(yaw * rad2deg), (float)(pitch * rad2deg), (float)(roll * rad2deg));
 }
 
 cv::Point3f rotmatRQ_YZX(const cv::Mat& R){
@@ -234,11 +292,6 @@ cv::Point3f rotmatRQ_YZX(const cv::Mat& R){
     // Execute RQ Decomposition
     // Pass the rotation matrix R as the input source
     cv::Vec3d eulerAngles = cv::RQDecomp3x3(R, mtxR, mtxQ, Qx, Qy, Qz);
-
-    // 4. Output the extracted Euler Angles
-    // std::cout << "Pitch (X-axis rotation) in degrees: " << eulerAngles[0] << std::endl;
-    // std::cout << "Yaw   (Y-axis rotation) in degrees: " << eulerAngles[1] << std::endl;
-    // std::cout << "Roll  (Z-axis rotation) in degrees: " << eulerAngles[2] << std::endl;
 
     return cv::Point3f(eulerAngles[2], eulerAngles[0], eulerAngles[1]);
 }
@@ -280,7 +333,7 @@ int getInt(const std::unordered_map<std::string,std::string>& kv,
 
 // Convert a double to a string where the decimal point is replaced with '_'.
 // Example: 11829.695398 -> "11829_695398"
-std::string timeToUnderscoreString(int precision) {
+std::string timeToString(int precision) {
     const auto t_now = std::chrono::system_clock::now().time_since_epoch();
     double value = std::chrono::duration<double>(t_now).count();
     std::ostringstream oss;

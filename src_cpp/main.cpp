@@ -1,3 +1,21 @@
+// ImageMatcher: the drone-repositioning entry point.
+//
+// Overall flow of main():
+//   1. Parse CLI flags, set up logging (Logger for text logs, AlgoLogger for CSV).
+//   2. Start the MetadataTcpClient command receiver (listens for start/stop/pause
+//      commands over UDP — see MetadataClient.h/.cpp).
+//   3. Open the video source (openCapture(): local camera, RTSP via OpenCV/ffmpeg, or
+//      a TCP feed from Unreal Engine) and start RtspReader, which publishes frames
+//      both in-process and into shared memory.
+//   4. Launch the external Python SuperPoint/LightGlue matcher process
+//      (launch_python_posix(), see src_py/matches_onnx.py) and open the SPSGReader
+//      shared-memory link to read its match results (see Matches.hpp).
+//   5. Construct the ImageMatcher against the target image.
+//   6. Run the main loop: wait for a start command, then each iteration reads a
+//      frame + the latest matches, calls ImageMatcher::getAlignment() to estimate
+//      relative rotation/translation, converts that into command velocities, sends
+//      them via MetadataTcpClient::respositionFunc(), and logs everything to CSV via
+//      AlgoLogger. Stops on a stop command, a timeout, or reaching+holding the target.
 #include "ImageMatcher.h"
 #include "MetadataClient.h"
 #include "RtspReader.h"
@@ -9,41 +27,415 @@
 #include <opencv2/opencv.hpp>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <algorithm>
+#include <chrono>
+#include <deque>
 #include <iostream>
 #include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
 
-// Helper constants used for velocity scaling and smoothing.
+// Helper constants used for velocity scaling.
 namespace {
 constexpr float kRotationGain = 0.1f;
-constexpr float kTranslationGain = 0.2f;
-constexpr float kVelocitySmoothing = 0.5f;
+constexpr float kTranslationGain = 0.15f;
 constexpr float kMaxVelocity = 50.0f;
 constexpr float kMaxRotationRate = 5.0f;
-constexpr int kReprojectWindowSize = 10;
+
+// Hard cap on how much the final angleRateCmd/cmdVx may change per second, applied
+// just before they're sent to DroneManager, so a single noisy frame (a bad match
+// set, a gate mode flip) can't show up as a sharp jump/swing in the commanded
+// velocity sent to PX4. Clamps the step itself, scaled by the actual elapsed time
+// (dt), so it caps worst-case jumps regardless of frame rate or how noisy the raw
+// signal is -- a hard bound, not a proportional damping.
+//
+// Expressed as a ramp time rather than a raw rate, since that's the knob that
+// actually matters: how long a legitimate command takes to reach full scale from
+// zero. kCmdRampTimeSec previously defaulted to kMaxRotationRate/kMaxVelocity
+// themselves as the rate, i.e. a full 1 s ramp (2 s for a full -max to +max swing)
+// -- too sluggish for a ~16 fps loop that needs to react within a few frames.
+// Smaller = snappier real response but a single bad frame moves the output further
+// before the next frame corrects it; larger = the opposite. Tune this one number.
+constexpr float kCmdRampTimeSec = 0.2f;  // reach full-scale output in ~0.2 s (~3 frames at 16 fps)
+constexpr float kCmdMaxRatePerSec_Rot   = kMaxRotationRate / kCmdRampTimeSec;  // deg/s^2
+constexpr float kCmdMaxRatePerSec_Trans = kMaxVelocity / kCmdRampTimeSec;      // cm/s^2
+
+// ── Translation gate: when to move, and when translation has arrived ─────────────
+// Replaces the old per-axis 3 px deadband in respositionFunc, which (a) counted frames
+// where PNEC set t = 0 for lack of signal as "arrived" (runs stopped ~1 m short) and
+// (b) judged every frame on its own, so a t whose sign flipped frame to frame made the
+// drone dither instead of settle (logData4_9, 2026-10-05).
+// Windows are in seconds, not frames: the Release build runs ~16 frames/s, where the
+// old 5-frame windows covered only 0.3 s (logData4_11).
+constexpr double kArriveWindowSec   = 1.0;   // arrival median of parallaxPx over this span
+constexpr int    kArriveMinSamples  = 5;     // ...with at least this many frames in it
+constexpr float  kArriveNoiseFactor = 1.2f;  // arrival threshold = factor * noise level...
+constexpr float  kArriveMinPx       = 1.0f;  // ...clamped to [min, max] px
+constexpr float  kArriveMaxPx       = 3.0f;
+constexpr double kDirMaxAgeSec      = 1.0;   // a measured direction stays usable this long
+constexpr int    kDirMinSamples     = 3;     // directions needed before moving
+constexpr float  kMinConsistency    = 0.6f;  // |mean of unit directions| needed to move
+// Resolution limit: no usable direction for kLimitNoDirSec, parallax within a few noise
+// levels and no longer decreasing = as close as the measurements can tell. Without this
+// the drone would hold until the timeout between "too weak for a direction" and
+// "aligned". It was 2.5x noise with a 5-frame window and fired at 2.1-2.9 px while
+// parallax was still falling (logData4_11 runs 3, 4).
+constexpr float  kLimitNoiseFactor  = 1.5f;
+constexpr double kLimitNoDirSec     = 1.0;
+constexpr float  kLimitMinDecrease  = 0.05f; // recent median must be >= (1 - this) * previous
+// Outlier frames: parallax above this factor * window median is dropped (single-frame
+// 10-20 px spikes commanded 20-25 cm/s in logData4_11 run 5). After
+// kMaxOutlierStreak consecutive drops the jump is taken as real and accepted.
+constexpr float  kOutlierFactor     = 3.0f;
+constexpr int    kMaxOutlierStreak  = 3;
+
+// Clamps how fast a cv::Point3f command may change, in units/sec, independent of
+// frame rate: the allowed step this call is maxRatePerSec * dt, dt measured from
+// the previous call's nowSec. A hard bound on the step -- it guarantees the output
+// can never jump further than the rate allows, however large the raw input swing
+// is. First call adopts the input with no clamp (nothing to ramp from yet).
+struct SlewLimit3 {
+    explicit SlewLimit3(float maxRatePerSec) : maxRatePerSec_(maxRatePerSec) {}
+
+    cv::Point3f update(const cv::Point3f& x, double nowSec) {
+        if (!init_) {
+            value_ = x;
+            lastSec_ = nowSec;
+            init_ = true;
+            return value_;
+        }
+        const float dt = static_cast<float>(std::clamp(nowSec - lastSec_, 0.0, 1.0));
+        lastSec_ = nowSec;
+        const float maxDelta = maxRatePerSec_ * dt;
+        auto clampAxis = [maxDelta](float prev, float target) {
+            return prev + std::clamp(target - prev, -maxDelta, maxDelta);
+        };
+        value_ = cv::Point3f(
+            clampAxis(value_.x, x.x),
+            clampAxis(value_.y, x.y),
+            clampAxis(value_.z, x.z));
+        return value_;
+    }
+
+private:
+    float maxRatePerSec_;
+    cv::Point3f value_{0, 0, 0};
+    double lastSec_ = 0.0;
+    bool init_ = false;
+};
+
+struct TranslationGate {
+    struct Result {
+        cv::Point3f error{0, 0, 0};   // filtered direction * current parallaxPx (0 = no move)
+        bool aligned = false;          // translation arrived
+        float consistency = 0, medianPx = 0, thresholdPx = 0;
+        const char* mode = "hold";   // move | hold | aligned | aligned-limit | outlier
+    };
+
+    // unitDir: this frame's t direction in command axes, zero when PNEC found no
+    // translation signal; parallaxPx is measured either way; noisePx from the estimator;
+    // nowSec: frame time in seconds (any monotonic clock).
+    Result update(const cv::Point3f& unitDir, float parallaxPx, float noisePx, double nowSec) {
+        // Outlier check against the median of the last arrival window.
+        const auto recent = window(nowSec - kArriveWindowSec, nowSec + 1.0);
+        if (static_cast<int>(recent.size()) >= kArriveMinSamples
+            && parallaxPx > kOutlierFactor * median(recent)
+            && outlierStreak_ < kMaxOutlierStreak) {
+            ++outlierStreak_;
+            Result r = last_;
+            r.mode = "outlier";
+            return r;
+        }
+        outlierStreak_ = 0;
+
+        parallax_.push_back({parallaxPx, nowSec});
+        while (!parallax_.empty() && nowSec - parallax_.front().t > 2 * kArriveWindowSec)
+            parallax_.pop_front();
+        if (cv::norm(unitDir) > 1e-6) { dirs_.push_back({unitDir, nowSec}); lastDirSec_ = nowSec; }
+        if (lastDirSec_ < 0) lastDirSec_ = nowSec;   // start counting from the first frame
+        while (!dirs_.empty() && nowSec - dirs_.front().t > kDirMaxAgeSec) dirs_.pop_front();
+
+        Result r;
+        const float noise = std::isfinite(noisePx) ? kArriveNoiseFactor * noisePx : kArriveMaxPx;
+        r.thresholdPx = std::clamp(noise, kArriveMinPx, kArriveMaxPx);
+        const auto cur = window(nowSec - kArriveWindowSec, nowSec + 1.0);
+        r.medianPx = median(cur);
+        // The window must actually span the arrival time, not just hold enough frames.
+        const bool fullWindow = static_cast<int>(cur.size()) >= kArriveMinSamples
+            && nowSec - parallax_.front().t >= 0.8 * kArriveWindowSec;
+
+        // Arrived: parallax itself (measured with or without a direction) has stayed
+        // below the noise-based threshold for the whole window.
+        if (fullWindow && r.medianPx < r.thresholdPx) {
+            r.aligned = true;
+            r.mode = "aligned";
+            return last_ = r;
+        }
+        // Resolution limit, only once parallax has stopped falling.
+        const float limitPx = std::isfinite(noisePx)
+            ? std::min(kLimitNoiseFactor * noisePx, kArriveMaxPx) : r.thresholdPx;
+        const auto prev = window(nowSec - 2 * kArriveWindowSec, nowSec - kArriveWindowSec);
+        const bool stalled = static_cast<int>(prev.size()) >= kArriveMinSamples
+            && r.medianPx >= (1.0f - kLimitMinDecrease) * median(prev);
+        if (fullWindow && stalled && nowSec - lastDirSec_ >= kLimitNoDirSec && r.medianPx < limitPx) {
+            r.aligned = true;
+            r.mode = "aligned-limit";
+            return last_ = r;
+        }
+        // Move only along a direction the recent frames agree on; random sign flips
+        // average out (low consistency) and the drone holds instead of dithering.
+        cv::Point3f sum(0, 0, 0);
+        for (const auto& d : dirs_) sum += d.dir;
+        if (!dirs_.empty()) r.consistency = static_cast<float>(cv::norm(sum)) / dirs_.size();
+        if (static_cast<int>(dirs_.size()) >= kDirMinSamples && r.consistency >= kMinConsistency) {
+            r.error = sum * (parallaxPx / static_cast<float>(cv::norm(sum)));
+            r.mode = "move";
+        }
+        return last_ = r;
+    }
+
+private:
+    struct DirSample { cv::Point3f dir; double t; };
+    struct PxSample { float px; double t; };
+    std::deque<DirSample> dirs_;
+    std::deque<PxSample> parallax_;
+    Result last_;
+    double lastDirSec_ = -1;
+    int outlierStreak_ = 0;
+
+    // Parallax samples with time in [from, to).
+    std::vector<float> window(double from, double to) const {
+        std::vector<float> v;
+        for (const auto& s : parallax_) if (s.t >= from && s.t < to) v.push_back(s.px);
+        return v;
+    }
+    static float median(std::vector<float> v) {
+        if (v.empty()) return 0.0f;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    }
+};
+
+// ── Gate for the image-based translation error (--trans-source flow | ecc) ───────
+// The error vector from ImageMatcher's flow fit (option 1) or ECC (option 2) is
+// signed and goes to zero at the target. Like rotation, each axis settles on its own:
+// a settled axis gets a zero command, so leftover noise on it does not keep the drone
+// moving or skew the others. Arrival needs every axis settled AND the net error
+// (vector length) below settlePx.
+constexpr double kFitSmoothSec   = 0.3;    // command = mean error over this span
+constexpr double kFitSettleSec   = 1.0;    // settle test span...
+constexpr int    kFitMinSamples  = 5;      // ...with at least this many frames
+constexpr float  kResumeFactor   = 2.0f;   // a settled axis resumes above this * axis threshold
+// Option 3, overshoot detector per axis: that axis's error changing sign between
+// significant samples at least kOscMinFlips times within kOscWindowSec, while its
+// median stays within kOscMaxFactor * axis threshold, settles the axis.
+constexpr double kOscWindowSec   = 2.0;
+constexpr int    kOscMinFlips    = 2;
+constexpr float  kOscMaxFactor   = 2.0f;
+
+struct FitGate {
+    struct Result {
+        cv::Point3f error{0, 0, 0};     // per-axis command error, px (0 on settled axes)
+        bool aligned = false;
+        cv::Point3f medianAbs{0, 0, 0}; // per-axis median |error| over the settle span, px
+        float medianNorm = 0;           // median |error vector| over the settle span, px
+        bool settled[3] = {false, false, false};
+        int flips[3] = {0, 0, 0};
+        const char* mode = "move";      // move | settled | invalid
+    };
+
+    // settlePx: net (vector length) arrival threshold. axisPx: per-axis settle
+    // threshold; <= settlePx / sqrt(3) guarantees all-axes-settled implies the net test.
+    FitGate(float settlePx, float axisPx, bool useOscillation)
+        : settlePx_(settlePx), axisPx_(axisPx), useOsc_(useOscillation) {}
+
+    Result update(bool valid, const cv::Point3f& error, double nowSec) {
+        Result r;
+        for (int i = 0; i < 3; ++i) r.settled[i] = settled_[i];
+        if (!valid) { r.mode = "invalid"; return r; }
+        samples_.push_back({error, nowSec});
+        while (!samples_.empty() && nowSec - samples_.front().t > kOscWindowSec) samples_.pop_front();
+
+        std::vector<float> abs[3], norms;
+        cv::Point3f smooth(0, 0, 0);
+        int nSmooth = 0;
+        for (const auto& s : samples_) {
+            if (nowSec - s.t <= kFitSettleSec) {
+                for (int i = 0; i < 3; ++i) abs[i].push_back(std::abs(axis(s.e, i)));
+                norms.push_back(static_cast<float>(cv::norm(s.e)));
+            }
+            if (nowSec - s.t <= kFitSmoothSec) { smooth += s.e; ++nSmooth; }
+        }
+        smooth *= 1.0f / std::max(nSmooth, 1);
+        const bool fullWindow = static_cast<int>(norms.size()) >= kFitMinSamples
+            && nowSec - samples_.front().t >= 0.8 * kFitSettleSec;
+        r.medianAbs = {median(abs[0]), median(abs[1]), median(abs[2])};
+        r.medianNorm = median(norms);
+
+        for (int i = 0; i < 3; ++i) {
+            const float med = axis(r.medianAbs, i);
+            // Sign changes of this axis between samples where it is significant.
+            int prevSign = 0;
+            for (const auto& s : samples_) {
+                const float v = axis(s.e, i);
+                if (std::abs(v) < axisPx_) continue;
+                const int sign = v > 0 ? 1 : -1;
+                if (prevSign != 0 && sign != prevSign) ++r.flips[i];
+                prevSign = sign;
+            }
+            if (!settled_[i]) {
+                const bool still = med < axisPx_;
+                const bool osc = useOsc_ && r.flips[i] >= kOscMinFlips && med < kOscMaxFactor * axisPx_;
+                if (fullWindow && (still || osc)) settled_[i] = true;
+            } else if (std::abs(axis(smooth, i)) > kResumeFactor * axisPx_) {
+                settled_[i] = false;   // drifted away again
+            }
+        }
+        const bool allSettled = settled_[0] && settled_[1] && settled_[2];
+        if (allSettled && r.medianNorm < settlePx_) {
+            r.aligned = true;
+            r.mode = "settled";
+        } else if (allSettled) {
+            // Every axis is within its band but the net error is not: reopen the
+            // largest axis so the drone does not sit with zero commands forever.
+            int worst = 0;
+            for (int i = 1; i < 3; ++i) if (axis(r.medianAbs, i) > axis(r.medianAbs, worst)) worst = i;
+            settled_[worst] = false;
+        }
+        for (int i = 0; i < 3; ++i) {
+            r.settled[i] = settled_[i];
+            if (!r.aligned && !settled_[i]) axis(r.error, i) = axis(smooth, i);
+        }
+        return r;
+    }
+
+private:
+    struct Sample { cv::Point3f e; double t; };
+    std::deque<Sample> samples_;
+    bool settled_[3] = {false, false, false};
+    float settlePx_, axisPx_;
+    bool useOsc_;
+    static float& axis(cv::Point3f& v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
+    static float axis(const cv::Point3f& v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
+    static float median(std::vector<float> v) {
+        if (v.empty()) return 0.0f;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    }
+};
+
+// ── Control law (--control), for the ablation study ───────────────────────────────
+//   tanh:   u = U * tanh(k e / 2)                     (default; equals 2/(1+e^-ke) - 1)
+//   linear: u = clip(Kp e, -U, U)                     same gain near zero, hard saturation
+//   pd:     u = clip(Kp (e + Td de/dt), -U, U)        Td = --pd-td
+//   pid:    u = clip(Kp (e + I/Ti + Td de/dt), -U, U) Ti = --pid-ti, I = integral of e
+// with Kp = U k / 2, so all laws share the small-signal gain and differ only in
+// saturation, damping and the integral. The derivative is taken on the error, low-pass
+// filtered with time constant kPdFilterSec, and reset while the axis is inactive.
+//
+// The integral exists to cancel a persistent disturbance such as wind drift: a
+// velocity-commanded vehicle is already an integrator, so P alone reaches zero error
+// for a fixed goal, but a constant drift d leaves it an offset d / Kp. Because of that
+// it is used on the translation axes only (wind does not push the gimbal angle), and:
+//   - integration only inside |e| < --pid-izone px (no wind-up on the long approach);
+//   - conditional integration: frozen while the command is saturated in the direction
+//     of the error (anti-windup), and its share of the command is capped at U;
+//   - a settled (inactive) axis is not reset: the integrator is frozen and its output
+//     Kp I / Ti is still commanded, so the drone keeps compensating the drift instead of
+//     drifting off until the axis resumes.
+enum class ControlLaw { Tanh, Linear, PD, PID };
+constexpr double kPdFilterSec = 0.1;
+
+struct LawParams {
+    ControlLaw law = ControlLaw::Tanh;
+    float td = 0.0f;       // derivative time, s (pd, pid)
+    float ti = 0.0f;       // integral time, s (pid); <= 0 disables the integral
+    float izone = 0.0f;    // integrate only while |e| is below this
+};
+
+struct AxisController {
+    float update(float e, float limit, float gain, const LawParams& p, double nowSec, bool active) {
+        const float kp = limit * gain * 0.5f;
+        const bool useI = p.law == ControlLaw::PID && p.ti > 0.0f;
+        if (!active) {
+            valid_ = false;
+            return useI ? std::clamp(static_cast<float>(kp * integral_ / p.ti), -limit, limit) : 0.0f;
+        }
+        if (p.law == ControlLaw::Tanh) return limit * std::tanh(0.5f * gain * e);
+
+        const double dt = valid_ && nowSec > prevT_ ? nowSec - prevT_ : 0.0;
+        float u = kp * e;
+        if (p.law == ControlLaw::PD || p.law == ControlLaw::PID) {
+            if (dt > 0.0) {
+                const double raw = (e - prevE_) / dt;
+                const double a = kPdFilterSec / (kPdFilterSec + dt);
+                dFilt_ = a * dFilt_ + (1.0 - a) * raw;
+            } else {
+                dFilt_ = 0.0;
+            }
+            u += static_cast<float>(kp * p.td * dFilt_);
+        }
+        if (useI) {
+            double next = integral_;
+            if (dt > 0.0 && std::abs(e) < p.izone) next += e * dt;
+            // Cap the integral's share of the command at the saturation limit.
+            const double cap = limit * p.ti / kp;
+            next = std::clamp(next, -cap, cap);
+            const float uNext = u + static_cast<float>(kp * next / p.ti);
+            const bool saturatedWithError = std::abs(uNext) > limit && (uNext > 0) == (e > 0);
+            if (!saturatedWithError) integral_ = next;
+            u += static_cast<float>(kp * integral_ / p.ti);
+        }
+        prevE_ = e;
+        prevT_ = nowSec;
+        valid_ = true;
+        return std::clamp(u, -limit, limit);
+    }
+
+private:
+    bool valid_ = false;
+    float prevE_ = 0.0f;
+    double prevT_ = 0.0;
+    double dFilt_ = 0.0;
+    double integral_ = 0.0;   // px * s
+};
+
+struct VectorController {
+    AxisController axis[3];
+    // Rotation errors are always active (the deadband is applied in respositionFunc);
+    // translation axes are inactive while their error is exactly zero (settled).
+    cv::Point3f update(const cv::Point3f& e, float limit, float gain, const LawParams& p,
+                       double nowSec, bool zeroIsInactive) {
+        const float v[3] = {e.x, e.y, e.z};
+        float u[3];
+        for (int i = 0; i < 3; ++i)
+            u[i] = axis[i].update(v[i], limit, gain, p, nowSec, !(zeroIsInactive && v[i] == 0.0f));
+        return {u[0], u[1], u[2]};
+    }
+};
 
 // Open either a local camera or remote stream depending on the selected mode.
+// mode == "live": opens the fixed V4L2 device below and blocks (up to t seconds)
+//   warming it up until WARMUP_GOOD_FRAMES consecutive good frames are read.
+// mode == "stream" with a TCP url: does nothing here — RtspReader handles that
+//   connection itself once started.
+// mode == "stream" otherwise: opens streamUrl via OpenCV's FFmpeg backend, retrying
+//   until it succeeds (this call does NOT time out).
 bool openCapture(const std::string& mode,
                  const std::string& streamUrl,
                  int t,
                  cv::VideoCapture& cap,
                  Logger& appLogger) {
     if (mode == "live") {
-
-        std::string device = "/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0"
+        // NOTE: hardcoded to this specific USB camera's by-id device path. If the
+        // camera hardware changes, this needs to change too (or be made a CLI flag).
+        std::string device = "/dev/v4l/by-id/usb-UltraSemi_USB3_Video_20210623-video-index0";
 
         auto reconnect = [&]() -> bool {
             appLogger.log("main", "error: [CAM] Reconnecting to camera...");
             cap.release();
-
-            // Wait for the device node to come back
-            // for (int i = 0; i < 10; ++i) {
-            //     std::this_thread::sleep_for(std::chrono::seconds(1));
-            //     if (std::filesystem::exists(devicePath_)) break;
-            //     std::cerr << "[CAM] Waiting for device... (" << i+1 << "/10)\n";
-            // }
 
             cap.open(device, cv::CAP_V4L2);
             if (!cap.isOpened()) {
@@ -66,9 +458,7 @@ bool openCapture(const std::string& mode,
             appLogger.log("main", "[CAM] Reconnected");
             return true;
         };
-        // int indices[] = {cameraIndex, cameraIndex == 0 ? 1 : 0};
-        // std::string device = "/dev/video" + std::to_string(cameraIndex);
-        if (!std::filesystem::exists(device)){ 
+        if (!std::filesystem::exists(device)){
             {
                 std::ostringstream ss;
                 ss << "[Camera] file " << device << " does not exist";
@@ -78,14 +468,12 @@ bool openCapture(const std::string& mode,
 
         cap.release();
 
-        // for (int index : indices) {
         {
             std::ostringstream ss;
             ss << "[Camera] Trying " << device;
             appLogger.log("main", ss.str());
         }
 
-        // cap.release();
         if(reconnect()) {
             {
                 std::ostringstream ss;
@@ -96,8 +484,6 @@ bool openCapture(const std::string& mode,
             appLogger.log("main", "Warming up sensor...");
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-
-        
 
         cv::Mat frame;
 
@@ -192,15 +578,10 @@ bool openCapture(const std::string& mode,
         );
 
         return true;
-        return true;
     }
 
     if (mode == "stream" && !(streamUrl.find("tcp") != std::string::npos)) {
         setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp", 1);
-        // while (!cap.open(streamUrl, cv::CAP_FFMPEG)) {
-        //     std::cout << "Waiting for stream to be available: " << streamUrl << std::endl;
-        //     usleep(1000 * 1000);
-        // }
         // Retry loop until the stream is successfully opened
         while (!cap.isOpened()) {
             {
@@ -216,7 +597,6 @@ bool openCapture(const std::string& mode,
                 usleep(1000 * 1000); // Wait 1 second before trying again
             }
         }
-        // cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
         return true;
     }
     if (mode == "stream" && streamUrl.find("tcp") != std::string::npos) {
@@ -245,6 +625,59 @@ int main(int argc, char** argv) {
     const std::string memoryName = getStr(flags, "--memory", "/sp_sg_matches");
     const int cameraIndex = getInt(flags, "--camera", 0);
     const bool unrealTest = (getInt(flags, "--unreal", 0) != 0);
+    // Translation error source driving the gate: "parallax" (PNEC t + median parallax,
+    // TranslationGate), "flow" (option 1: signed fit of the de-rotated match
+    // displacements) or "ecc" (option 2: dense ECC). --osc-arrival 1 also accepts the
+    // overshoot detector (option 3) as arrival; --ecc-log 1 computes ECC for the log
+    // even when it is not the source.
+    const std::string transSource = getStr(flags, "--trans-source", "flow");
+    const bool oscArrival = getInt(flags, "--osc-arrival", 1) != 0;
+    const bool eccLog = getInt(flags, "--ecc-log", 0) != 0;
+    // Flow/ecc gate thresholds, px: net error (vector length) for arrival, and the
+    // per-axis settle threshold (default settle-px / sqrt(3), so all axes settled
+    // implies the net test).
+    const float settlePx = static_cast<float>(std::stod(getStr(flags, "--settle-px", "1.5")));
+    const float axisSettlePx = static_cast<float>(std::stod(getStr(flags, "--axis-settle-px",
+                                   std::to_string(settlePx / std::sqrt(3.0f)))));
+    // Ablation switches (all default to the full method):
+    //   --rot-estimator pnec|nec|e   rotation estimator (A.5)
+    //   --cov tensor|identity        2D keypoint covariance: structure tensor or sigma = 1 px
+    //   --lk 1|0                     Lucas-Kanade sub-pixel refinement in the matcher
+    //   --control tanh|linear|pd|pid control law; --pd-td derivative time in s (pd, pid),
+    //                                --pid-ti integral time in s, --pid-izone px (pid)
+    const std::string rotEstimator = getStr(flags, "--rot-estimator", "pnec");
+    const std::string covMode = getStr(flags, "--cov", "tensor");
+    const bool lkRefine = getInt(flags, "--lk", 1) != 0;
+    const std::string controlName = getStr(flags, "--control", "tanh");
+    const float pdTd = static_cast<float>(std::stod(getStr(flags, "--pd-td", "0.05")));
+    const float pidTi = static_cast<float>(std::stod(getStr(flags, "--pid-ti", "5.0")));
+    const float pidIzone = static_cast<float>(std::stod(getStr(flags, "--pid-izone", "5.0")));
+    if (rotEstimator != "pnec" && rotEstimator != "nec" && rotEstimator != "e") {
+        std::cerr << "--rot-estimator must be pnec, nec or e" << std::endl;
+        return 1;
+    }
+    if (covMode != "tensor" && covMode != "identity") {
+        std::cerr << "--cov must be tensor or identity" << std::endl;
+        return 1;
+    }
+    if (controlName != "tanh" && controlName != "linear" && controlName != "pd" && controlName != "pid") {
+        std::cerr << "--control must be tanh, linear, pd or pid" << std::endl;
+        return 1;
+    }
+    LawParams translationLaw;
+    translationLaw.law = controlName == "pid" ? ControlLaw::PID
+                       : controlName == "pd" ? ControlLaw::PD
+                       : controlName == "linear" ? ControlLaw::Linear : ControlLaw::Tanh;
+    translationLaw.td = pdTd;
+    translationLaw.ti = pidTi;
+    translationLaw.izone = pidIzone;
+    // The gimbal angle is not disturbed by wind: in pid mode rotation runs P + D only.
+    LawParams rotationLaw = translationLaw;
+    if (rotationLaw.law == ControlLaw::PID) rotationLaw.law = ControlLaw::PD;
+    if (transSource != "parallax" && transSource != "flow" && transSource != "ecc") {
+        std::cerr << "--trans-source must be parallax, flow or ecc" << std::endl;
+        return 1;
+    }
 
     const std::string cmdIp = getStr(flags, "--cmd_ip", "0.0.0.0");
     const int cmdPort = getInt(flags, "--cmd_port", 9020);
@@ -255,12 +688,8 @@ int main(int argc, char** argv) {
     std::string targetImagePath = getStr(flags, "--target", "../target.png");
     const int imgHeight = getInt(flags, "--imgHeight", 1080);
     const int imgWidth = getInt(flags, "--imgWidth", 1920);
-    const int timer = getInt(flags, "--timer", 180);
+    const int timer = getInt(flags, "--timer", 300);
     const int targetImageIndex = getInt(flags, "--targetIndex", -1);
-
-    // bool hardStop = false;
-
-    // Application logger for human-readable runtime logs.
 
     // Ensure log directory exists before creating the logger.
     const std::filesystem::path logDirectory = std::filesystem::path(logPath);
@@ -271,11 +700,15 @@ int main(int argc, char** argv) {
     if (!logImages.empty() && !std::filesystem::exists(logImages)) {
         std::filesystem::create_directories(logImages);
     }
+    // One timestamp names every file of this run (dataLog_, log_, matches_).
+    const std::string runStamp = timeToUnderscoreString();
     // Create a CSV logger for runtime data and command history.
-    const std::string logData = logPath + "dataLog_" + timeToUnderscoreString() + ".csv";
+    const std::string logData = logPath + "dataLog_" + runStamp + ".csv";
     AlgoLogger algoLogger(logData, /*write_header=*/true, /*flush_every_n=*/30);
 
-    const std::string logFile = logPath + "log_" + timeToUnderscoreString() + ".txt";
+    const std::string logFile = logPath + "log_" + runStamp + ".txt";
+    // Last match set Python sent to C++, overwritten by Python after every set.
+    const std::string matchesFile = logPath + "matches_" + runStamp + ".npz";
     Logger appLogger(logFile);
     appLogger.log("main", std::string("[mode] ") + mode);
     {
@@ -296,12 +729,6 @@ int main(int argc, char** argv) {
     }
     client.startReceiver();
 
-    // if (!client.StartConnectionHandler(msgIp, msgPort, "metadata_server")) {
-    //     std::cerr << "Failed to start metadata server connection handler. Ensure port " << msgPort << " is available." << std::endl;
-    //     return -1;
-    // }
-    // std::cout << "Connected to metadata server" << std::endl;
-
     // Open the selected video source and set the requested resolution.
     cv::VideoCapture cap;
     if (!openCapture(mode, streamUrl, timer, cap, appLogger)) {
@@ -313,8 +740,6 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // cap.set(cv::CAP_PROP_FRAME_WIDTH, imgWidth);
-    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, imgHeight);
     if (!cap.isOpened() && !(streamUrl.find("tcp") != std::string::npos)) {
         appLogger.log("main", "error: Cannot open camera/stream");
         return -1;
@@ -338,14 +763,14 @@ int main(int argc, char** argv) {
        cam = streamUrl;
     }
     std::this_thread::sleep_for(std::chrono::seconds(5));
-    // std::cout << "To launch Python process for matches.py "<< std::endl;
-    // launch_python(targetImagePath);
     if (targetImageIndex != -1){
         // Construct the filename using the index: e.g., "camera0.png"    
         targetImagePath =  expandUser("~/drone_repositioning/targets/") + "targetImage" + std::to_string(targetImageIndex) + ".jpg";
     }
 
-    launch_python_posix(onnx_matches, targetImagePath);
+    PythonProcess python = launch_python_posix(onnx_matches, targetImagePath, appLogger,
+        lkRefine ? std::vector<std::string>{"--save-matches", matchesFile}
+                 : std::vector<std::string>{"--save-matches", matchesFile, "--no-lk"});
     {
         std::ostringstream ss;
         ss << "Launched Python process for matches with target image: " << targetImagePath;
@@ -367,21 +792,53 @@ int main(int argc, char** argv) {
                     0,            0,            1.0f);
     // Load the target image matcher used for alignment estimation.
     ImageMatcher matcher(appLogger, targetImagePath, cameraMatrix);
+    matcher.setEccEnabled(transSource == "ecc" || eccLog);
+    {
+        pnec::PNECOptions pnecOptions;
+        pnecOptions.rotationMethod = rotEstimator == "e" ? pnec::RotationMethod::Essential
+                                   : rotEstimator == "nec" ? pnec::RotationMethod::NEC
+                                   : pnec::RotationMethod::PNEC;
+        matcher.setPnecOptions(pnecOptions);
+        matcher.setIdentityCovariance(covMode == "identity");
+    }
+    {
+        // The run's configuration, in the log and as config_<stamp>.txt next to the
+        // other files of the run, so ablation results can be grouped by setting.
+        std::ostringstream ss;
+        ss << "rot-estimator=" << rotEstimator << "\n"
+           << "cov=" << covMode << "\n"
+           << "lk=" << lkRefine << "\n"
+           << "control=" << controlName << "\n"
+           << "pd-td=" << pdTd << "\n"
+           << "pid-ti=" << pidTi << "\n"
+           << "pid-izone=" << pidIzone << "\n"
+           << "trans-source=" << transSource << "\n"
+           << "settle-px=" << settlePx << "\n"
+           << "axis-settle-px=" << axisSettlePx << "\n"
+           << "osc-arrival=" << oscArrival << "\n"
+           << "target=" << targetImagePath << "\n";
+        std::ofstream(logPath + "config_" + runStamp + ".txt") << ss.str();
+        std::string oneLine = ss.str();
+        std::replace(oneLine.begin(), oneLine.end(), '\n', ' ');
+        appLogger.log("main", "Ablation config: " + oneLine);
+    }
+    appLogger.log("main", "Translation source: " + transSource + " settle-px=" + std::to_string(settlePx) + " axis-settle-px=" + std::to_string(axisSettlePx) + " osc-arrival=" + std::to_string(oscArrival)
+                  + " ecc=" + std::to_string(transSource == "ecc" || eccLog));
     {
         std::ostringstream ss;
         ss << "Image matcher initialized with target image: " << targetImagePath;
         appLogger.log("main", ss.str());
     }
-    // cv::Mat frame;
-    // std::vector<int> directionHistory;
-    std::vector<float> reprojectErrors;
-    // cv::Point3f lastCmdVx(0.0f, 0.0f, 0.0f);
-    // cv::Point3f lastAngleRate(0.0f, 0.0f, 0.0f);
     bool hasStarted = false;
     bool complete = false;
     bool atTarget = false;
+    TranslationGate translationGate;
+    FitGate fitGate(settlePx, axisSettlePx, oscArrival);
+    VectorController rotationController, translationController;
+    AxisController parallaxSpeedController;
+    SlewLimit3 rotCmdSlew(kCmdMaxRatePerSec_Rot);
+    SlewLimit3 transCmdSlew(kCmdMaxRatePerSec_Trans);
     double arrivalTime = 0.0;
-    // double oldMeanError = std::numeric_limits<double>::infinity();
 
     // Main repositioning loop: wait for start, process frames, and send commands.
     double start_time = AlgoLogger::nowWallSec();
@@ -390,7 +847,12 @@ int main(int argc, char** argv) {
         if (client.stopRepositioning.load()) {
             appLogger.log("main", "Received command to stop repositioning");
             std::stringstream ss;
-            // reader.sendStopSignal();
+            // std::stringstream ss;
+            ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
+            std::string data_to_send = ss.str();
+            if (!client.SendMetadata(data_to_send)){
+                appLogger.log("main", "error: Could not send Stop command");
+            }
             break;
         }
         if (currentTime - start_time > timer){
@@ -398,6 +860,12 @@ int main(int argc, char** argv) {
                 appLogger.log("main", "Drone Repositioning Timed Out");
                 std::stringstream ss;
                 // reader.sendStopSignal();
+                // std::stringstream ss;
+                ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
+                std::string data_to_send = ss.str();
+                if (!client.SendMetadata(data_to_send)){
+                    appLogger.log("main", "error: Could not send Stop command");
+                }
                 complete = true;
                 break;
             }
@@ -411,14 +879,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // if (client.pauseRepositioning.load()) {
-        //     std::cout << "Received command to pause repositioning" << std::endl;
-        //     while (!client.resumeRepositioning.load()) {
-        //         usleep(1000 * 100);
-        //     }
-        //     std::cout << "Resuming repositioning" << std::endl;
-        // }
-
         while (client.pauseRepositioning.load()){
             appLogger.log("main", "Received command to pause repositioning");
             usleep(1000 * 100);
@@ -429,11 +889,8 @@ int main(int argc, char** argv) {
         }
 
         hasStarted = true;
-        // cv::Mat frame;
-        // bool success;
         auto [frame, success_frame] = reader.getFrame();
         if (!success_frame) {
-            // std::cout << "Waiting to receive image \n";
             // Skip processing when no new frame is available.
             continue;
         }
@@ -446,23 +903,20 @@ int main(int argc, char** argv) {
         Matches matches = result.value();
 
         if (!matches.newMatches){
-            // std::cout << "Waiting for new matches....\n";
             continue;
         }
 
         // Compute alignment direction and error metrics from the current frame.
-        const double imgTs = AlgoLogger::nowWallSec();
-        // const auto [rotationMatrix, directionCv, flow, transError, success] = matcher.getAlignmentDirection(frame, client.rotationOnly.load());
+        const auto tAlign0 = std::chrono::steady_clock::now();
         const auto [rotationMatrix, direction, transError_, success] = matcher.getAlignment(matches, frame);
-        // const float rotError = std::acos((cv::trace(rotationMatrix)[0] - 1.0f) / 2.0f) * 180.0f / CV_PI;
-     
+        const double alignMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - tAlign0).count();
+
         // Convert estimated rotation and translation to the appropriate coordinate frame.
         const cv::Point3f rotationVec = rotmatToYPRDeg_XYZ(rotationMatrix);
         bool hasNaNRot = std::isnan(rotationVec.x) || std::isnan(rotationVec.y) || std::isnan(rotationVec.z);
         bool hasNanTrans = std::isnan(direction.x) || std::isnan(direction.y) || std::isnan(direction.z) || std::isnan(transError_);
-        // std::cout << "rotation vec: x=" << rotationVec.x << " y=" << rotationVec.y << " z=" << rotationVec.z << std::endl;
-        // std::cout << "direction: x=" << direction.x << " y=" << direction.y << " z=" << direction.z << std::endl;
-        
+
         if(hasNaNRot) {
             appLogger.log("main", "error: NaN detected in rotation or translation vector, skipping this frame.");
             continue;
@@ -480,26 +934,51 @@ int main(int argc, char** argv) {
             continue;
         }
         
-        cv::Point3f directionCv(direction.x * transError, direction.y * transError, direction.z * transError);
-        // const cv::Point3f rotationVec = rotmatRQ_YZX(rotationMatrix);
-        const cv::Point3f rotation = rotationVec; // Convert to degrees if needed);
-        const cv::Point3f translation = unrealTest ? ConvertCVToUE(directionCv) : directionCv;
-        // const cv::Point3f px_error = unrealTest ? ConvertCVToUE(trans_vec) : trans_vec;
-        
-        // Compute command velocities, then apply smoothing for stability.
-        cv::Point3f angleRateCmd = kMaxRotationRate * activation(rotation, kRotationGain);
-        cv::Point3f cmdVx = kMaxVelocity * activation(translation, kTranslationGain);
-        
+        const cv::Point3f rotation = rotationVec;
+        const cv::Point3f unitDir = hasNanTrans ? cv::Point3f(0, 0, 0)
+                                  : (unrealTest ? ConvertCVToUE(direction) : ConvertCVToPX4(direction));
+        const double nowSec = std::chrono::duration<double>(tAlign0.time_since_epoch()).count();
+        // The parallax gate always runs so its decision stays in the log for comparison.
+        const auto gate = translationGate.update(unitDir, transError, matcher.lastNoisePx(), nowSec);
+        {
+            std::ostringstream ss;
+            ss << "translationGate: mode=" << gate.mode << " medianPx=" << gate.medianPx
+               << " thresholdPx=" << gate.thresholdPx << " consistency=" << gate.consistency;
+            appLogger.log("main", ss.str());
+        }
+        cv::Point3f translation = gate.error;
+        bool translationAligned = gate.aligned;
+        if (transSource != "parallax") {
+            const TranslationFit& fit = transSource == "ecc" ? matcher.lastEccFit() : matcher.lastFlowFit();
+            const cv::Point3f err = unrealTest ? ConvertCVToUE(fit.errorPx()) : ConvertCVToPX4(fit.errorPx());
+            const auto fg = fitGate.update(fit.valid, err, nowSec);
+            translation = fg.error;
+            translationAligned = fg.aligned;
+            std::ostringstream ss;
+            ss << "fitGate(" << transSource << "): mode=" << fg.mode << " settledAxes="
+               << (fg.settled[0] ? 'x' : '-') << (fg.settled[1] ? 'y' : '-') << (fg.settled[2] ? 'z' : '-')
+               << " medianAbsPx=" << fg.medianAbs.x << "," << fg.medianAbs.y << "," << fg.medianAbs.z
+               << " medianNormPx=" << fg.medianNorm << " flips=" << fg.flips[0] << "," << fg.flips[1]
+               << "," << fg.flips[2] << " errPx=" << fg.error.x << "," << fg.error.y << "," << fg.error.z;
+            appLogger.log("main", ss.str());
+        }
 
-        // const int meanPreviousDirection = (directionHistory.size() < 8)
-        //     ? -2
-        //     : std::round(std::accumulate(directionHistory.begin(), directionHistory.end(), 0.0) / directionHistory.size());
-        // if (meanPreviousDirection == 0) {
-        //     cmdVx.x = 0.0f;
-        // }
-
-        // cmdVx = kVelocitySmoothing * cmdVx + (1.0f - kVelocitySmoothing) * lastCmdVx;
-        // angleRateCmd = kVelocitySmoothing * angleRateCmd + (1.0f - kVelocitySmoothing) * lastAngleRate;
+        // Compute command velocities. Parallax source: translation saturates on its
+        // magnitude so the filtered direction is kept. Flow/ecc: per axis (below).
+        cv::Point3f angleRateCmd = rotationController.update(rotation, kMaxRotationRate, kRotationGain,
+                                                             rotationLaw, nowSec, false);
+        cv::Point3f cmdVx(0, 0, 0);
+        const float transNorm = static_cast<float>(cv::norm(translation));
+        if (transSource != "parallax") {
+            // Per-axis speed, like rotation: each axis follows its own error, and a
+            // settled axis (zero error) gets zero speed.
+            cmdVx = translationController.update(translation, kMaxVelocity, kTranslationGain,
+                                                 translationLaw, nowSec, true);
+        } else {
+            const float speed = parallaxSpeedController.update(transNorm, kMaxVelocity, kTranslationGain,
+                                                               translationLaw, nowSec, transNorm > 1e-6f);
+            if (transNorm > 1e-6f) cmdVx = translation * (speed / transNorm);
+        }
 
         {
             std::ostringstream ss;
@@ -516,10 +995,22 @@ int main(int argc, char** argv) {
             ss << "transError: " << transError;
             appLogger.log("main", ss.str());
         }
-        
-        
+
+        // Hard-cap the final commands' rate of change so a single noisy frame can't
+        // show up as a sharp swing at PX4. Applied last, after gating/sigmoid, so it
+        // bounds whatever actually got computed this frame regardless of mode.
+        // angleRateCmd = rotCmdSlew.update(angleRateCmd, nowSec);
+        cmdVx = transCmdSlew.update(cmdVx, nowSec);
+        {
+            std::ostringstream ss;
+            ss << "finalCmd: rate=" << angleRateCmd.x << "," << angleRateCmd.y << "," << angleRateCmd.z
+               << " vel=" << cmdVx.x << "," << cmdVx.y << "," << cmdVx.z;
+            appLogger.log("main", ss.str());
+        }
+        // float rotErrDeg = Eigen::AngleAxisd(rotationMatrix).angle() * 180.0 / M_PI;   // R: Eigen::Matrix3d
+        // const cv::Point3f rotationVec()
         std::string dataToSend;
-        if (client.respositionFunc(angleRateCmd, cmdVx, rotation, translation, dataToSend, unrealTest) ) {
+        if (client.respositionFunc(angleRateCmd, cmdVx, rotation, translationAligned, dataToSend, unrealTest) ) {
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "0" << "\n";
             std::string data_to_send = ss.str();
@@ -539,7 +1030,8 @@ int main(int argc, char** argv) {
         
         if (atTarget && ((currentTime - arrivalTime > 1.0) ) && arrivalTime > 0.0) {
             appLogger.log("main", "Maintained target position for 2 seconds, stopping repositioning");
-            std::string dataToSend;
+            // Save the end image before the -1 command: the controller may kill us once it gets it.
+            reader.saveEndImage();
             std::stringstream ss;
             ss << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << 0 << "," << "-1" << "\n";
             std::string data_to_send = ss.str();
@@ -552,12 +1044,34 @@ int main(int argc, char** argv) {
         // Log the command and error values for later analysis.
         const auto parsed = AlgoLogger::parseCommand6(dataToSend);
         auto unit_vect = translation / transError;
-        algoLogger.log(currentTime, transError, rotation, unit_vect, parsed);
+        AlgoLogger::FrameTiming ft;
+        ft.matchId = matches.matchId;
+        ft.camFrameId = matches.camFrameId;
+        ft.skipped = matches.skipped;
+        ft.pyFrameTs = matches.pyFrameTs;
+        ft.pyDoneTs = matches.pyDoneTs;
+        ft.recvTs = matches.recvTs;
+        ft.alignMs = alignMs;
+        algoLogger.log(currentTime, transError, rotation, unit_vect, parsed, ft);
+        {
+            std::ostringstream ss;
+            ss.setf(std::ios::fixed);
+            ss.precision(1);
+            ss << "timing match_id=" << matches.matchId << " cam_frame=" << matches.camFrameId
+               << " skipped=" << matches.skipped
+               << " py_ms=" << (matches.pyDoneTs - matches.pyFrameTs) * 1000.0
+               << " handoff_ms=" << (matches.recvTs - matches.pyDoneTs) * 1000.0
+               << " align_ms=" << alignMs
+               << " to_send_ms=" << (currentTime - matches.recvTs) * 1000.0
+               << " age_ms=" << (currentTime - matches.pyFrameTs) * 1000.0;
+            appLogger.log("main", ss.str());
+        }
 
     }
     matchesReader.stop();
-    reader.stop();
-        
+    reader.stop();          // sets is_alive = 0 on the frame segment: Python exits
+    python.stop();          // wait for it, log its exit status, join the output thread
+
     client.stopReceiver();
     return 0;
 }
